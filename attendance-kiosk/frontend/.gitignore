@@ -30,3 +30,7 @@ venv/
 
 # Environment Variables
 .env
+
+serviceAccountKey.json
+*.key.json
+*.pem
