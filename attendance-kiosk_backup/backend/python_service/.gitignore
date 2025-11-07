@@ -1,5 +1,0 @@
-# Ignore Firebase service account keys in backup copy too
-serviceAccountKey.json
-serviceAccountKey-*.json
-serviceAccountKey.*.json
-*serviceAccountKey*.json
