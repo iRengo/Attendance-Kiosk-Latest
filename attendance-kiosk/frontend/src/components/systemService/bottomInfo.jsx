@@ -29,21 +29,33 @@ function BottomInfo({ studentCount = "N/A" }) {
         setStudentName("Not Available");
         setStudentStatus("Service inactive");
         return;
+      } else {
+        // session active but no recognized student yet: show detecting
+        if (!lastStudentRef.current) {
+          setStudentName("Detecting faces...");
+          setStudentStatus("Detecting faces...");
+        }
       }
 
       try {
         const res = await axios.get(`${API_BASE}/recognize-camera`);
         const data = res.data || {};
         // Persist last recognized student until a different student is recognized. Clear on session end.
-        if (data && data.status === "success" && data.id) {
-          if (!lastStudentRef.current || String(lastStudentRef.current.id) !== String(data.id)) {
+        if (data && data.id && (data.status === "success" || data.status === "denied")) {
+          // new detection or changed id
+          if (!lastStudentRef.current || String(lastStudentRef.current.id) !== String(data.id) || lastStudentRef.current.status !== data.status) {
             lastStudentRef.current = data;
-            setStudentName(data.name || "Unknown");
-            if (data.registered === false) {
+            // If recognition reports denied or not registered, show denied state
+            const isDenied = data.status === "denied" || data.registered === false;
+            setStudentName(data.name || (isDenied ? "Unknown" : "Unknown"));
+            if (isDenied) {
               setStudentStatus("Denied - Not registered");
               setStudentId(data.id || null);
-              setStudentProfileUrl(data.profilePicUrl ? (data.profilePicUrl.startsWith('/') ? `${API_BASE}${data.profilePicUrl}` : data.profilePicUrl) : (data.id ? `${API_BASE}/photos/students/${data.id}.jpg` : null));
+              // Keep the default avatar when the student is denied / not registered
+              // (do not set a profile URL so the SVG placeholder remains visible)
+              setStudentProfileUrl(null);
             } else {
+              // successful and registered
               setStudentStatus("Present");
               setStudentId(data.id || null);
               setStudentProfileUrl(data.profilePicUrl ? (data.profilePicUrl.startsWith('/') ? `${API_BASE}${data.profilePicUrl}` : data.profilePicUrl) : (data.id ? `${API_BASE}/photos/students/${data.id}.jpg` : null));
@@ -59,13 +71,12 @@ function BottomInfo({ studentCount = "N/A" }) {
             }
           }
         } else {
-          // don't immediately clear on transient failures; clear only when session inactive
-          if (!(sessionInfo && sessionInfo.class_id)) {
-            lastStudentRef.current = null;
-            setStudentName("Not Available");
-            setStudentStatus("Service inactive");
-            setStudentId(null);
-            setStudentProfileUrl(null);
+          // no valid detection this tick: keep showing detecting while session active
+          if (sessionInfo && sessionInfo.class_id) {
+            if (!lastStudentRef.current) {
+              setStudentName("Detecting faces...");
+              setStudentStatus("Detecting faces...");
+            }
           }
         }
       } catch (err) {

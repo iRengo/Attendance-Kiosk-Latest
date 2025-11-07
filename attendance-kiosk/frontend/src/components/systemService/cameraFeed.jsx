@@ -10,7 +10,6 @@ function CameraFeed() {
   const [sessionInfo, setSessionInfo] = useState(null);
   const [teacherDetected, setTeacherDetected] = useState(null);
   const lastTeacherRef = useRef(null);
-  const teacherTimerRef = useRef(null);
   const [showClassModal, setShowClassModal] = useState(false);
   const [classesList, setClassesList] = useState([]);
   const [selectedClass, setSelectedClass] = useState("");
@@ -76,20 +75,14 @@ function CameraFeed() {
           if (!lastTeacherRef.current || String(lastTeacherRef.current.id) !== String(data.id)) {
             lastTeacherRef.current = data;
             setTeacherDetected(data);
-          } else {
-            // same teacher recognized again; keep the displayed info
-            setTeacherDetected(lastTeacherRef.current);
           }
-          // reset the 30s timer that will clear the last recognized teacher
-          try { if (teacherTimerRef.current) clearTimeout(teacherTimerRef.current); } catch(e){}
-          teacherTimerRef.current = setTimeout(() => {
+        } else {
+          // don't immediately clear on transient no-face/noise; only clear when the session ends
+          // however, if there is no active session, clear immediately
+          if (!(sessionInfo && sessionInfo.class_id)) {
             lastTeacherRef.current = null;
             setTeacherDetected(null);
-            teacherTimerRef.current = null;
-          }, 30000);
-        } else {
-          // don't immediately clear on transient no-face/noise; rely on the above timer to clear after 30s
-          // if there's no active session and nothing recognized yet, keep state as-is (timer will clear when appropriate)
+          }
         }
       } catch (e) {
         // ignore
@@ -100,13 +93,7 @@ function CameraFeed() {
     fetchTeacher();
     const sid = setInterval(fetchSession, 3000);
     const tid = setInterval(fetchTeacher, 1500);
-    return () => {
-      mounted = false;
-      clearInterval(sid);
-      clearInterval(tid);
-      try { if (teacherTimerRef.current) clearTimeout(teacherTimerRef.current); } catch(e){}
-      teacherTimerRef.current = null;
-    };
+    return () => { mounted = false; clearInterval(sid); clearInterval(tid); };
   }, []);
 
   // derive overlay state

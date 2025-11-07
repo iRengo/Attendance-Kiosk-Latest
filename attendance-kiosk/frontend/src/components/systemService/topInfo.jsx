@@ -8,7 +8,6 @@ function TopInfo({ teacherName: propTeacherName = "", title = "Teacher", classNa
   const [sessionInfo, setSessionInfo] = useState(null);
   const [teacherDetected, setTeacherDetected] = useState(null);
   const lastTeacherRef = React.useRef(null);
-  const teacherTimerRef = React.useRef(null);
 
   // Poll current session to display active class when started
   useEffect(() => {
@@ -38,7 +37,7 @@ function TopInfo({ teacherName: propTeacherName = "", title = "Teacher", classNa
         if (!res.ok) return;
         const json = await res.json();
         if (!mounted) return;
-        // Persist last recognized teacher until a different id appears. Clear after 30s.
+        // Persist last recognized teacher until a different id appears.
         if (json && json.status === 'success' && json.id) {
           // update if new id
           if (!lastTeacherRef.current || String(lastTeacherRef.current.id) !== String(json.id)) {
@@ -48,21 +47,11 @@ function TopInfo({ teacherName: propTeacherName = "", title = "Teacher", classNa
             // same id, ensure displayed
             setTeacherDetected(lastTeacherRef.current);
           }
-          // reset timer
-          try { if (teacherTimerRef.current) clearTimeout(teacherTimerRef.current); } catch(e){}
-          teacherTimerRef.current = setTimeout(() => {
+        } else {
+          // if there's no active session, clear immediately
+          if (!(sessionInfo && sessionInfo.class_id)) {
             lastTeacherRef.current = null;
             setTeacherDetected(null);
-            teacherTimerRef.current = null;
-          }, 30000);
-        } else {
-          // if session not active, do not keep displaying beyond timer; keep current until timer expires
-          if (!(sessionInfo && sessionInfo.class_id)) {
-            // no active session: if there's no timer, ensure cleared
-            if (!teacherTimerRef.current) {
-              lastTeacherRef.current = null;
-              setTeacherDetected(null);
-            }
           }
         }
       } catch (e) {
@@ -85,7 +74,6 @@ function TopInfo({ teacherName: propTeacherName = "", title = "Teacher", classNa
     if (!isActive) {
       lastTeacherRef.current = null;
       setTeacherDetected(null);
-      try { if (teacherTimerRef.current) { clearTimeout(teacherTimerRef.current); teacherTimerRef.current = null; } } catch(e){}
     }
   }, [isActive]);
 
@@ -101,12 +89,16 @@ function TopInfo({ teacherName: propTeacherName = "", title = "Teacher", classNa
            * 2. fallback to local photos path: /photos/teachers/{teacherId}.jpg
            */}
           {(() => {
-            // When recognized, prefer the local image served at /photos/teachers/{docid}.jpg
-            const teacherId = isActive ? (sessionInfo.teacher_id || '') : (teacherDetected ? (teacherDetected.id || '') : '');
+            // Only show a teacher image while a session is active.
+            // If a session is active prefer session profilePicUrl then session teacher_id.
+            // When no active session, always show the default SVG (teacherImgSrc = null).
             const sessionProfile = isActive ? (sessionInfo.profilePicUrl || sessionInfo.teacher_profilePicUrl || '') : '';
-            const teacherImgSrc = sessionProfile
-              ? (sessionProfile.startsWith('/') ? `${API_BASE}${sessionProfile}` : sessionProfile)
-              : (teacherId ? `${API_BASE}/photos/teachers/${teacherId}.jpg` : null);
+            const teacherId = isActive ? (sessionInfo.teacher_id || (teacherDetected ? (teacherDetected.id || '') : '')) : '';
+            const teacherImgSrc = isActive
+              ? (sessionProfile
+                  ? (sessionProfile.startsWith('/') ? `${API_BASE}${sessionProfile}` : sessionProfile)
+                  : (teacherId ? `${API_BASE}/photos/teachers/${teacherId}.jpg` : null))
+              : null;
             return teacherImgSrc ? (
               <img
                 src={teacherImgSrc}
