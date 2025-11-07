@@ -1,0 +1,7 @@
+# Ignore Firebase service account keys
+serviceAccountKey.json
+serviceAccountKey-*.json
+serviceAccountKey.*.json
+
+# If there are other local secrets named similarly, ignore them too
+*serviceAccountKey*.json
