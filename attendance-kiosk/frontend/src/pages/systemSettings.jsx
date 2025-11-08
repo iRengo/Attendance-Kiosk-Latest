@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { FaArrowLeft } from "react-icons/fa";
 import { useNavigate } from "react-router-dom";
 
@@ -11,14 +11,68 @@ function SettingsPage() {
     const navigate = useNavigate();
     const [activeTab, setActiveTab] = useState("kiosk");
 
-    const [deviceInfo] = useState({
-        serial: "00000000A1B2C3D4",
-        hostname: "raspberrypi-room 103",
-        ip: "192.168.1.25",
-        location: "Room 103 - IT Department",
-        osVersion: "Raspberry Pi OS (64-bit)",
-        appVersion: "v1.0.0",
-    });
+    const [deviceInfo, setDeviceInfo] = useState(null);
+    const [loadingInfo, setLoadingInfo] = useState(true);
+
+    useEffect(() => {
+        const fetchInfo = async () => {
+            setLoadingInfo(true);
+            try {
+                const res = await fetch("http://localhost:8000/device/info");
+                const data = await res.json();
+                const kiosk = data && data.kiosk ? data.kiosk : null;
+                // normalize to previous deviceInfo shape expected by KioskInfoTab
+                if (kiosk) {
+                    setDeviceInfo({
+                        serial: kiosk.serialNumber || "",
+                        hostname: kiosk.name || kiosk.id || window.location.hostname,
+                        ip: kiosk.ipAddress || "",
+                        location: kiosk.assignedRoomName || "Not Assigned",
+                        osVersion: "Raspberry Pi OS (64-bit)",
+                        appVersion: "v1.0.0",
+                        // pass through raw kiosk fields too
+                        ...kiosk,
+                    });
+                } else {
+                    setDeviceInfo(null);
+                }
+            } catch (err) {
+                console.error("Failed to fetch device info", err);
+                setDeviceInfo(null);
+            } finally {
+                setLoadingInfo(false);
+            }
+        };
+        fetchInfo();
+    }, []);
+
+    const refreshRooms = async () => {
+        try {
+            // trigger backend sync (manual)
+            await fetch("http://localhost:8000/sync");
+        } catch (err) {
+            console.error("Sync failed", err);
+        }
+        // re-fetch device info after sync
+        try {
+            const res = await fetch("http://localhost:8000/device/info");
+            const data = await res.json();
+            const kiosk = data && data.kiosk ? data.kiosk : null;
+            if (kiosk) {
+                setDeviceInfo({
+                    serial: kiosk.serialNumber || "",
+                    hostname: kiosk.name || kiosk.id || window.location.hostname,
+                    ip: kiosk.ipAddress || "",
+                    location: kiosk.assignedRoomName || "Not Assigned",
+                    osVersion: "Raspberry Pi OS (64-bit)",
+                    appVersion: "v1.0.0",
+                    ...kiosk,
+                });
+            }
+        } catch (err) {
+            console.error("Failed to re-fetch device info", err);
+        }
+    };
 
     const [csvFile, setCsvFile] = useState(null);
 
@@ -66,7 +120,7 @@ function SettingsPage() {
                 </div>
 
                 <div className="flex-1 p-10 relative overflow-y-auto">
-                    {activeTab === "kiosk" && <KioskInfoTab deviceInfo={deviceInfo} />}
+                    {activeTab === "kiosk" && <KioskInfoTab deviceInfo={deviceInfo || {}} onRefresh={refreshRooms} />}
                     {activeTab === "beta" && (
                         <BetaTestTab csvFile={csvFile} handleFileChange={handleFileChange} />
                     )}

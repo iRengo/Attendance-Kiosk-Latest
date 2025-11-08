@@ -195,6 +195,15 @@ function CameraFeed() {
       const cls = (res.data && res.data.classes) || [];
       setClassesList(cls);
       setSelectedClass(cls.length > 0 ? cls[0].id : "");
+      // fire an update event so RoomInfo can refresh immediately (or accept the assignedRoomId from detail)
+      try {
+        const dres = await axios.get(`${API_BASE}/device/info`);
+        const dk = (dres.data && (dres.data.kiosk || dres.data.device)) || dres.data || null;
+        const assigned = dk && (dk.assignedRoomId ?? dk.assignedRoom ?? dk.roomId ?? dk.assignedRoomName);
+        window.dispatchEvent(new CustomEvent('kioskAssignedUpdated', { detail: { assignedRoomId: assigned } }));
+      } catch (e) {
+        // best-effort: still open modal
+      }
       setShowClassModal(true);
     } catch (e) {
       console.error("Failed to fetch classes", e);
@@ -220,6 +229,13 @@ function CameraFeed() {
       setSessionInfo(res.data && res.data.session ? res.data.session : null);
       setShowClassModal(false);
       setToast("Service started");
+      // notify RoomInfo immediately after a successful start (assigned room likely present)
+      try {
+        const dres2 = await axios.get(`${API_BASE}/device/info`);
+        const dk2 = (dres2.data && (dres2.data.kiosk || dres2.data.device)) || dres2.data || null;
+        const assigned2 = dk2 && (dk2.assignedRoomId ?? dk2.assignedRoom ?? dk2.roomId ?? dk2.assignedRoomName);
+        window.dispatchEvent(new CustomEvent('kioskAssignedUpdated', { detail: { assignedRoomId: assigned2 } }));
+      } catch (e) {}
     } catch (e) {
       console.error("Failed to start session", e);
     } finally {
