@@ -291,16 +291,43 @@ def stop_session():
                             except Exception:
                                 pass
 
-                    # sanitize class name for doc id and extract date portion (YYYY-MM-DD)
+                    # Build doc id from class metadata: subjectName, gradeLevel, section + date
                     def _sanitize(s: str) -> str:
                         if not s:
                             return ""
                         return "".join(c for c in s.replace(" ", "_") if (c.isalnum() or c in "-__")).strip("_")
 
+                    # prefer class subject/grade/section for id to meet requirement
+                    class_part = None
+                    try:
+                        conn3 = state.get_db()
+                        cur3 = conn3.cursor()
+                        cur3.execute("SELECT subjectName, gradeLevel, section, name FROM classes WHERE id = ?", (cid,))
+                        rclass = cur3.fetchone()
+                        if rclass:
+                            subject, grade, section, cname = rclass[0], rclass[1], rclass[2], rclass[3]
+                            parts = []
+                            if subject:
+                                parts.append(str(subject))
+                            if section:
+                                parts.append(str(section))
+                            if grade:
+                                parts.append(str(grade))
+                            class_part = "_".join(parts) if parts else (cname or None)
+                        conn3.close()
+                    except Exception:
+                        try:
+                            if conn3:
+                                conn3.close()
+                        except Exception:
+                            pass
+
                     date_str = session_doc.get("date") or now
-                    # prefer just the date part (before 'T') for id
                     date_part = str(date_str).split("T")[0]
-                    class_part = _sanitize(class_name)[:120] if class_name else "unknown_class"
+                    if class_part:
+                        class_part = _sanitize(class_part)[:120]
+                    else:
+                        class_part = _sanitize(class_name)[:120] if class_name else "unknown_class"
                     doc_id = f"{class_part}_{date_part}"
 
                     # Replace roomId with teacher name + class name as requested, and remove raw_doc to avoid redundancy

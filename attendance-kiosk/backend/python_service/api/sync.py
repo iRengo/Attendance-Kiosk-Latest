@@ -47,7 +47,14 @@ except Exception:
 @router.get("/sync")
 def sync_firestore():
     if not db_fs:
-        return JSONResponse(content={"error": "service account not configured or firestore unavailable"}, status_code=500)
+        # Firestore client not configured. Return a clearer hint instead of a generic 500.
+        return JSONResponse(
+            content={
+                "error": "service account not configured or firestore unavailable",
+                "hint": f"Place your Firebase service account JSON at {cred_path} and restart the service, or use /sync/local_reload to refresh local embeddings from the DB.",
+            },
+            status_code=400,
+        )
     conn = None
     try:
         DB_PATH = getattr(state, 'DB_PATH', None)
@@ -353,9 +360,28 @@ def sync_firestore():
             message = "no_records_synced"
         return {"status": "success", "synced": synced_count, "message": message}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         try:
             if conn:
                 conn.rollback()
         except Exception:
             pass
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        # Return a concise error to the client, full traceback is in server logs
+        return JSONResponse(content={"error": "sync_failed", "detail": str(e)}, status_code=500)
+
+
+@router.get('/sync/local_reload')
+def sync_local_reload():
+    """Reload embeddings from the local sqlite DB into memory.
+
+    Useful when Firestore is not configured but you want the recognition
+    embeddings refreshed from the last local sync copy.
+    """
+    try:
+        state.load_embeddings()
+        return {"status": "ok", "message": "local_embeddings_reloaded"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(content={"error": "reload_failed", "detail": str(e)}, status_code=500)

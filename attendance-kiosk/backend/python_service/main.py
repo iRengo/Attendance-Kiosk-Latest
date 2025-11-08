@@ -14,13 +14,14 @@ app.add_middleware(
 )
 
 # Import and include routers from the api package
-from api import state, recognition, sync, session, outbox, media
+from api import state, recognition, sync, session, outbox, media, students
 
 app.include_router(recognition.router)
 app.include_router(sync.router)
 app.include_router(session.router)
 app.include_router(outbox.router)
 app.include_router(media.router)
+app.include_router(students.router)
 
 
 @app.get("/health")
