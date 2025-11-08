@@ -21,6 +21,9 @@ function CameraFeed() {
   const prevSessionRef = useRef(null);
   const [toast, setToast] = useState(null);
   const toastTimerRef = useRef(null);
+  const [presentStudentIds, setPresentStudentIds] = useState([]);
+  const [presentStudents, setPresentStudents] = useState([]);
+  const presentIdsRef = useRef([]);
 
   useEffect(() => {
     let canceled = false;
@@ -94,6 +97,64 @@ function CameraFeed() {
     const sid = setInterval(fetchSession, 3000);
     const tid = setInterval(fetchTeacher, 1500);
     return () => { mounted = false; clearInterval(sid); clearInterval(tid); };
+  }, []);
+
+  // Poll current attendance (list of present student IDs) and resolve names from backend
+  useEffect(() => {
+    let mounted = true;
+    const fetchAttendanceAndNames = async () => {
+      try {
+        // fetch present IDs from backend
+        const att = await axios.get(`${API_BASE}/session/attendance`);
+        if (!mounted) return;
+        const data = att.data || {};
+        const ids = Array.isArray(data.studentsPresent) ? data.studentsPresent : [];
+        // If ids unchanged, do nothing
+        const same = JSON.stringify(ids) === JSON.stringify(presentIdsRef.current);
+        if (same) return;
+        presentIdsRef.current = ids;
+        setPresentStudentIds(ids);
+
+        if (ids.length === 0) {
+          setPresentStudents([]);
+          return;
+        }
+
+        // batch fetch student names
+        try {
+          const q = encodeURIComponent(ids.join(","));
+          const res = await axios.get(`${API_BASE}/students?ids=${q}`);
+          const students = (res.data && res.data.students) || [];
+          // map to preserve order of ids
+          const byId = {};
+          students.forEach((s) => {
+            byId[String(s.id)] = s;
+          });
+          const ordered = ids.map((id) => {
+            const s = byId[String(id)];
+            if (s) {
+              return { id: id, firstname: s.firstname || "", lastname: s.lastname || "", name: `${(s.firstname || "").trim()} ${(s.lastname || "").trim()}`.trim() };
+            }
+            // fallback: show id if name not available
+            return { id: id, firstname: "", lastname: "", name: id };
+          });
+          setPresentStudents(ordered);
+        } catch (e) {
+          // if name lookup fails, at least show ids
+          setPresentStudents(ids.map((id) => ({ id, name: id })));
+        }
+      } catch (e) {
+        // ignore polling errors
+      }
+    };
+
+    // poll periodically while mounted
+    fetchAttendanceAndNames();
+    const iid = setInterval(fetchAttendanceAndNames, 1500);
+    return () => {
+      mounted = false;
+      clearInterval(iid);
+    };
   }, []);
 
   // derive overlay state
@@ -221,120 +282,142 @@ function CameraFeed() {
   }, [stopPending, teacherDetected, sessionInfo, isStopping]);
 
   return (
-    <div className="relative w-full h-full bg-black rounded overflow-hidden">
-      <img ref={imgRef} className="w-full h-full object-cover" alt="Camera feed" />
+    // outer split container: left = camera (85%), right = present students (15%)
+    <div className="w-full h-full rounded overflow-hidden flex">
+      {/* Left - Camera feed area (85%) */}
+      <div className="relative bg-black h-full" style={{ width: '85%' }}>
+        <img ref={imgRef} className="w-full h-full object-cover" alt="Camera feed" />
 
-  {/* Toast notification (simple local implementation) */}
-  {toast ? (
-    <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-50">
-      <div className="bg-black/80 text-white px-4 py-2 rounded-lg shadow">{toast}</div>
-    </div>
-  ) : null}
+        {/* Toast notification (simple local implementation) */}
+        {toast ? (
+          <div className="absolute top-6 left-1/2 transform -translate-x-1/2 z-50">
+            <div className="bg-black/80 text-white px-4 py-2 rounded-lg shadow">{toast}</div>
+          </div>
+        ) : null}
 
-  {/* Status overlay - bottom center */}
-      <div className="absolute left-1/2 transform -translate-x-1/2 bottom-4 z-40">
-        {/* When recognized, make overlay clickable to start service */}
-        {overlay.state === 'recognized' ? (
-          <button
-            onClick={openClassModal}
-            className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
-            style={{ borderWidth: 1 }}
-            aria-label="Start service for recognized teacher"
-          >
+        {/* Status overlay - bottom center */}
+        <div className="absolute left-1/2 transform -translate-x-1/2 bottom-4 z-40">
+          {/* When recognized, make overlay clickable to start service */}
+          {overlay.state === 'recognized' ? (
+            <button
+              onClick={openClassModal}
+              className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
+              style={{ borderWidth: 1 }}
+              aria-label="Start service for recognized teacher"
+            >
               <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-            <span className={`font-medium ${textClass}`}>{overlay.label} — Start service</span>
-          </button>
-        ) : overlay.state === 'active' ? (
-          <button
-            onClick={() => setShowStopConfirm(true)}
-            className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
-            style={{ borderWidth: 1 }}
-            aria-label="Service active - stop service"
-          >
-            <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-            <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-          </button>
-        ) : overlay.state === 'pending_stop' ? (
-          <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-            <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-            <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-          </div>
-        ) : (
-          <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-            <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-            <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-          </div>
-        )}
-      </div>
+              <span className={`font-medium ${textClass}`}>{overlay.label} — Start service</span>
+            </button>
+          ) : overlay.state === 'active' ? (
+            <button
+              onClick={() => setShowStopConfirm(true)}
+              className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
+              style={{ borderWidth: 1 }}
+              aria-label="Service active - stop service"
+            >
+              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+            </button>
+          ) : overlay.state === 'pending_stop' ? (
+            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+            </div>
+          ) : (
+            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+            </div>
+          )}
+        </div>
 
-      
+        {/* Keep modals here (they are fixed and will overlay viewport as before) */}
+        {showClassModal ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setShowClassModal(false)} />
+            <div className="relative bg-gray-800 text-white rounded-lg p-4 w-80 shadow-lg ring-1 ring-black/20 z-10">
+              <div className="flex items-start justify-between mb-2">
+                <div>
+                  <h3 className="text-md font-semibold text-white">Choose class to start</h3>
+                  <p className="text-sm text-gray-300 text-left">for {teacherDetected ? teacherDetected.name : "teacher"}</p>
+                </div>
+              </div>
+              <select className="w-full p-2 bg-black-700 text-gray-700 border border-gray-600 rounded mb-3" value={selectedClass} onChange={(e) => setSelectedClass(e.target.value)}>
+                {classesList.length === 0 ? (
+                  <option value="">No classes</option>
+                ) : (
+                  classesList.map((c) => (
+                    <option key={c.id} value={c.id}>{(c.subjectName || c.name || "Untitled")} — {`${c.gradeLevel || ''} ${c.section || ''}`.trim()}</option>
+                  ))
+                )}
+              </select>
 
-  
-      {showClassModal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setShowClassModal(false)} />
-          <div className="relative bg-gray-800 text-white rounded-lg p-4 w-80 shadow-lg ring-1 ring-black/20 z-10">
-            <div className="flex items-start justify-between mb-2">
-              <div>
-                <h3 className="text-md font-semibold text-white">Choose class to start</h3>
-                <p className="text-sm text-gray-300 text-left">for {teacherDetected ? teacherDetected.name : "teacher"}</p>
+              <div className="flex justify-end space-x-2">
+                <button
+                  type="button"
+                  className="px-3 py-1 text-sm rounded bg-gray-600 text-white hover:bg-gray-700"
+                  onClick={() => setShowClassModal(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className={`px-3 py-1 text-sm rounded ml-2 ${selectedClass && !isStarting ? 'bg-green-600 text-white hover:bg-green-700' : 'bg-gray-600 text-gray-300 opacity-60 cursor-not-allowed'}`}
+                  onClick={startService}
+                  aria-disabled={!selectedClass || isStarting}
+                >{isStarting ? 'Starting...' : 'Confirm'}</button>
               </div>
             </div>
-            <select className="w-full p-2 bg-black-700 text-gray-700 border border-gray-600 rounded mb-3" value={selectedClass} onChange={(e) => setSelectedClass(e.target.value)}>
-              {classesList.length === 0 ? (
-                <option value="">No classes</option>
-              ) : (
-                classesList.map((c) => (
-                  <option key={c.id} value={c.id}>{(c.subjectName || c.name || "Untitled")} — {`${c.gradeLevel || ''} ${c.section || ''}`.trim()}</option>
-                ))
-              )}
-            </select>
-            
-            <div className="flex justify-end space-x-2">
-              <button
-                type="button"
-                className="px-3 py-1 text-sm rounded bg-gray-600 text-white hover:bg-gray-700"
-                onClick={() => setShowClassModal(false)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className={`px-3 py-1 text-sm rounded ml-2 ${selectedClass && !isStarting ? 'bg-green-600 text-white hover:bg-green-700' : 'bg-gray-600 text-gray-300 opacity-60 cursor-not-allowed'}`}
-                onClick={startService}
-                aria-disabled={!selectedClass || isStarting}
-              >{isStarting ? 'Starting...' : 'Confirm'}</button>
+          </div>
+        ) : null}
+        {/* Stop confirmation modal */}
+        {showStopConfirm ? (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setShowStopConfirm(false)} />
+            <div className="relative bg-gray-800 text-white rounded-lg p-4 w-80 shadow-lg ring-1 ring-black/20 z-10">
+              <h3 className="text-md font-semibold mb-2">Stop service?</h3>
+              <p className="text-sm text-gray-300 mb-4">Are you sure you want to stop the active session?</p>
+              <div className="flex justify-end space-x-2">
+                <button className="px-3 py-1 text-sm rounded bg-gray-600 text-white hover:bg-gray-700" onClick={() => setShowStopConfirm(false)}>Cancel</button>
+                <button className="px-3 py-1 text-sm rounded ml-2 bg-red-600 text-white hover:bg-red-700" onClick={async () => {
+                  // Instead of stopping immediately, set a pending flag and require teacher re-recognition
+                  setShowStopConfirm(false);
+                  // start pending stop flow
+                  setStopPending(true);
+                  setToast("Scan face to stop service");
+                  // clear any previous timer
+                  try { if (stopTimerRef.current) clearTimeout(stopTimerRef.current); } catch(e){}
+                  // timeout pending stop after 30s
+                  stopTimerRef.current = setTimeout(() => {
+                    setStopPending(false);
+                    setToast(null);
+                  }, 30000);
+                }}>Stop</button>
+              </div>
             </div>
           </div>
+        ) : null}
+      </div>
+
+      {/* Right - Present Students list (15%) */}
+      <div className="h-full bg-gray-900 text-white p-3 overflow-y-auto whitespace-nowrap" style={{ width: '15%' }}>
+        <div className="sticky top-0">
+          <p className="text-xs text-gray-300 mb-3">Currently checked-in</p>
         </div>
-      ) : null}
-      {/* Stop confirmation modal */}
-      {showStopConfirm ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setShowStopConfirm(false)} />
-          <div className="relative bg-gray-800 text-white rounded-lg p-4 w-80 shadow-lg ring-1 ring-black/20 z-10">
-            <h3 className="text-md font-semibold mb-2">Stop service?</h3>
-            <p className="text-sm text-gray-300 mb-4">Are you sure you want to stop the active session?</p>
-            <div className="flex justify-end space-x-2">
-              <button className="px-3 py-1 text-sm rounded bg-gray-600 text-white hover:bg-gray-700" onClick={() => setShowStopConfirm(false)}>Cancel</button>
-              <button className="px-3 py-1 text-sm rounded ml-2 bg-red-600 text-white hover:bg-red-700" onClick={async () => {
-                // Instead of stopping immediately, set a pending flag and require teacher re-recognition
-                setShowStopConfirm(false);
-                // start pending stop flow
-                setStopPending(true);
-                setToast("Scan face to stop service");
-                // clear any previous timer
-                try { if (stopTimerRef.current) clearTimeout(stopTimerRef.current); } catch(e){}
-                // timeout pending stop after 30s
-                stopTimerRef.current = setTimeout(() => {
-                  setStopPending(false);
-                  setToast(null);
-                }, 30000);
-              }}>Stop</button>
-            </div>
-          </div>
+        <div>
+          {presentStudents && presentStudents.length > 0 ? (
+            <ul className="space-y-2">
+              {presentStudents.map((s) => (
+                <li key={s.id} className="px-2 py-1 bg-gray-800 rounded">
+                  <span className="text-sm">{(s.lastname+"," || s.firstname) ? `${(s.lastname+"," || "").trim()} ${(s.firstname || "").trim()}`.trim() : (s.name || s.id)}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-sm text-gray-400">No students present</div>
+          )}
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
