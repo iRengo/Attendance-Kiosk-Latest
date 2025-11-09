@@ -17,8 +17,83 @@ function CameraFeed() {
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [stopPending, setStopPending] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
+  const [teacherRegistered, setTeacherRegistered] = useState(null); // null=unknown, true/false known
   const stopTimerRef = useRef(null);
   const prevSessionRef = useRef(null);
+
+  // Check whether the recognized teacher is registered/assigned to this kiosk's room
+  useEffect(() => {
+    let mounted = true;
+    const checkRegistration = async () => {
+      // reset if no teacher recognized
+      if (!teacherDetected) {
+        if (mounted) setTeacherRegistered(null);
+        return;
+      }
+
+      try {
+        // 1) get device info to resolve assignedRoomId
+        const dres = await axios.get(`${API_BASE}/device/info`);
+        const dk = (dres.data && (dres.data.kiosk || dres.data.device)) || dres.data || null;
+        const assigned = dk && (dk.assignedRoomId ?? dk.assignedRoom ?? dk.roomId ?? dk.assignedRoomName);
+
+        // 2) fetch rooms and find matching room by fs_id or kiosk linkage
+        let rooms = [];
+        try {
+          // try kiosk-specific query first (if we have a kiosk id)
+          const kioskId = dk && (dk.id || dk.fs_id || dk.kioskId);
+          if (kioskId) {
+            const rres = await axios.get(`${API_BASE}/rooms?kioskid=${encodeURIComponent(kioskId)}`);
+            rooms = (rres.data && rres.data.rooms) || [];
+          }
+        } catch (e) {
+          // fallthrough to global rooms query
+        }
+
+        if ((!rooms || rooms.length === 0) && assigned) {
+          try {
+            const rres2 = await axios.get(`${API_BASE}/rooms`);
+            rooms = (rres2.data && rres2.data.rooms) || [];
+          } catch (e) {
+            rooms = [];
+          }
+        }
+
+        // find the room that matches assignedRoomId if present, otherwise try first room
+        let matched = null;
+        if (assigned && rooms && rooms.length > 0) {
+          matched = rooms.find((r) => String(r.fs_id) === String(assigned) || String(r.fs_id) === String(assigned));
+        }
+        if (!matched && rooms && rooms.length > 0) matched = rooms[0];
+
+        // determine if teacher id appears in assignedteachers JSON or in raw_doc
+        let registered = null;
+        if (matched) {
+          try {
+            const at = matched.assignedteachers || matched.assignedTeachers || null;
+            if (at) {
+              let arr = [];
+              try { arr = JSON.parse(at); } catch (e) { arr = Array.isArray(at) ? at : [] }
+              registered = arr.map((x) => String(x)).includes(String(teacherDetected.id));
+            }
+            // fallback: check raw_doc string for teacher id (best-effort)
+            if (!registered && matched.raw_doc && typeof matched.raw_doc === 'string') {
+              registered = String(matched.raw_doc).indexOf(String(teacherDetected.id)) !== -1;
+            }
+          } catch (e) {
+            registered = null;
+          }
+        }
+
+        if (mounted) setTeacherRegistered(registered === true ? true : false);
+      } catch (e) {
+        if (mounted) setTeacherRegistered(null);
+      }
+    };
+
+    checkRegistration();
+    return () => { mounted = false; };
+  }, [teacherDetected]);
   const [toast, setToast] = useState(null);
   const toastTimerRef = useRef(null);
   const [presentStudentIds, setPresentStudentIds] = useState([]);
@@ -163,6 +238,8 @@ function CameraFeed() {
     overlay = { state: "pending_stop", label: "Scan face to stop service" };
   } else if (sessionInfo && sessionInfo.class_id) {
     overlay = { state: "active", label: "Active" };
+  } else if (teacherDetected && teacherRegistered === false) {
+    overlay = { state: "not_registered", label: "You are not registered in this room" };
   } else if (teacherDetected) {
     overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
   }
@@ -172,6 +249,7 @@ function CameraFeed() {
     recognized: "bg-yellow-400",
     active: "bg-red-500",
     pending_stop: "bg-blue-400",
+    not_registered: "bg-red-500",
   }[overlay.state];
 
   const textClass = {
@@ -179,6 +257,7 @@ function CameraFeed() {
     recognized: "text-yellow-400",
     active: "text-green-400",
     pending_stop: "text-blue-400",
+    not_registered: "text-red-400",
   }[overlay.state];
 
   const borderClass = {
@@ -186,6 +265,7 @@ function CameraFeed() {
     recognized: "border-yellow-400",
     active: "border-green-400",
     pending_stop: "border-blue-400",
+    not_registered: "border-red-400",
   }[overlay.state];
 
   const openClassModal = async () => {
