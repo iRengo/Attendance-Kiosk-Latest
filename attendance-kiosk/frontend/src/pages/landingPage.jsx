@@ -45,7 +45,7 @@ function LandingPage() {
 
         <div
           className="flex flex-col items-center justify-center space-y-1 cursor-pointer hover:scale-105 transition-transform bg-gray-700/80 rounded-xl p-4 shadow-md"
-          onClick={() => alert("Class history clicked")}
+          onClick={() => navigate("/classHistory")}
         >
           <img
             src={classesIcon}
