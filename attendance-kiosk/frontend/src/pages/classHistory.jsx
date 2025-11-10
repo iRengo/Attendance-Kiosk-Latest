@@ -74,7 +74,7 @@ export default function ClassHistory() {
 
   const startIndex = (page - 1) * itemsPerPage;
   const paginated = history.slice(startIndex, startIndex + itemsPerPage);
-  const totalPages = Math.ceil(history.length / itemsPerPage);
+  const totalPages = Math.max(1, Math.ceil(history.length / itemsPerPage));
 
   return (
     <div className="relative w-full h-full flex flex-col items-start px-8 py-8 text-white overflow-auto">
@@ -204,8 +204,7 @@ export default function ClassHistory() {
               </div>
 
               {/* Pagination: left = "Page X of Y", center = dots, right = Prev/Next */}
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between mt-8 w-full max-w-6xl mx-auto">
+              <div className="flex items-center justify-between mt-8 w-full max-w-6xl mx-auto">
                   {/* Left: page text */}
                   <div className="text-sm text-gray-400">Page {page} of {totalPages}</div>
 
@@ -247,7 +246,6 @@ export default function ClassHistory() {
                     </button>
                   </div>
                 </div>
-              )}
             </>
           )}
         </>

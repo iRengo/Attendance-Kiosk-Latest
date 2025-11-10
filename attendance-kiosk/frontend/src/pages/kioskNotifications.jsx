@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
+import axios from "axios";
 import { useNavigate } from "react-router-dom";
-import { FaChevronLeft, FaInfoCircle, FaExclamationTriangle } from "react-icons/fa";
+import { FaChevronLeft, FaInfoCircle, FaExclamationTriangle, FaCheckCircle } from "react-icons/fa";
 
 const sampleData = [
   {
@@ -57,8 +58,23 @@ export default function KioskNotifications() {
   };
 
   useEffect(() => {
-    setNotes(sampleData);
+    const fetchNotes = async () => {
+      try {
+        const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+        const res = await axios.get(`${API_BASE}/kiosk_notifications`);
+        const items = (res.data && res.data.notifications) || [];
+        setNotes(items);
+      } catch (e) {
+        console.error('Failed to load notifications', e);
+        setNotes(sampleData);
+      }
+    };
+    fetchNotes();
+    const id = setInterval(fetchNotes, 10000); // refresh every 10s
+    return () => clearInterval(id);
   }, []);
+
+  const [expanded, setExpanded] = useState(null);
 
   const markRead = (id) => {
     setNotes((prev) => prev.map((n) => (n.notif_id === id ? { ...n, is_read: true } : n)));
@@ -68,12 +84,19 @@ export default function KioskNotifications() {
     setNotes((prev) => prev.map((n) => ({ ...n, is_read: true })));
   };
 
-  const filteredNotes = notes.filter((n) => {
-    if (filter === "unread") return !n.is_read;
-    if (filter === "alert") return n.type === "alert";
-    if (filter === "info") return n.type === "info";
-    return true; // all
-  });
+  const filteredNotes = notes
+    .filter((n) => {
+      if (filter === "unread") return !n.is_read;
+      if (filter === "alert") return n.type === "alert";
+      if (filter === "info") return n.type === "info";
+      if (filter === "success") return n.type === "success";
+      return true; // all
+    })
+    .sort((a, b) => {
+      const ta = Date.parse(a.timestamp || a.createdAt || 0) || 0;
+      const tb = Date.parse(b.timestamp || b.createdAt || 0) || 0;
+      return tb - ta; // newest first
+    });
 
   return (
     <div className="relative flex justify-center w-full h-full text-white">
@@ -87,7 +110,7 @@ export default function KioskNotifications() {
             <FaChevronLeft /> <span>Back</span>
           </button>
           <div className="flex flex-col space-y-2">
-            {["all", "unread", "alert", "info"].map((f) => (
+            {["all", "unread", "alert", "info", "success"].map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
@@ -130,13 +153,17 @@ export default function KioskNotifications() {
                 filteredNotes.map((n) => (
                   <div
                     key={n.notif_id}
-                    className={`relative p-4 rounded-xl bg-gray-700/80 border border-gray-600 flex gap-4 items-start shadow-md ${n.is_read ? "opacity-70" : ""}`}
+                    className={`relative p-4 rounded-xl bg-gray-700/80 border border-gray-600 flex flex-wrap gap-4 items-start shadow-md ${n.is_read ? "opacity-70" : ""}`}
                   >
                     <div className="w-20 h-20 bg-gray-800 rounded overflow-hidden flex items-center justify-center">
                       {n.image_url ? (
                         <img src={n.image_url} alt={n.title} className="w-full h-full object-cover" />
                       ) : n.type === "alert" ? (
+                        <FaExclamationTriangle className="text-red-400 text-3xl" />
+                      ) : n.type === "warning" ? (
                         <FaExclamationTriangle className="text-amber-400 text-3xl" />
+                      ) : n.type === "success" ? (
+                        <FaCheckCircle className="text-emerald-400 text-3xl" />
                       ) : (
                         <FaInfoCircle className="text-sky-400 text-3xl" />
                       )}
@@ -155,20 +182,28 @@ export default function KioskNotifications() {
                       </div>
 
                       <div className="mt-2 text-sm text-gray-200 space-y-1">
-                        <div><strong>Kiosk:</strong> {n.kiosk_id}</div>
-                        <div><strong>Class:</strong> {n.class_id || "—"}</div>
-                        <div><strong>Teacher:</strong> {n.teacher}</div>
+                        <div><strong>Kiosk ID:</strong> {n.kiosk_id}</div>
+                        <div><strong>Room Name:</strong> {n.room || "—"}</div>
                       </div>
 
                       {/* small view details button positioned to the right */}
                       <button
-                        onClick={() => alert(JSON.stringify(n, null, 2))}
+                        onClick={() => setExpanded(expanded === n.notif_id ? null : n.notif_id)}
                         className="absolute top-3 right-3 px-2 py-1 text-xs bg-gray-800 rounded-md hover:bg-gray-700"
                       >
-                        View details
+                        {expanded === n.notif_id ? 'Hide details' : 'View details'}
                       </button>
                       <div className="absolute bottom-3 right-3 text-xs text-gray-400">{formatRelative(n.timestamp)}</div>
                     </div>
+                    {expanded === n.notif_id && (
+                      <div className="w-full mt-3 p-3 bg-gray-800 rounded-md text-xs text-gray-200">
+                        {typeof n.details === 'string' ? (
+                          <div className="whitespace-pre-wrap">{n.details}</div>
+                        ) : (
+                          <pre className="whitespace-pre-wrap">{JSON.stringify(n.details || n.raw_doc || {}, null, 2)}</pre>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ))
               )}
