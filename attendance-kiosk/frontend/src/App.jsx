@@ -4,6 +4,7 @@ import LandingPage from "./pages/landingPage";
 import ClassHistory from "./pages/classHistory";
 import SettingsPage from "./pages/systemSettings";
 import SystemService from "./pages/systemService";
+import KioskNotifications from "./pages/kioskNotifications";
 import { useEffect, useState } from "react";
 
 import "./App.css";
@@ -69,6 +70,7 @@ function App() {
           <Route path="/" element={<ScreenSaver />} />
           <Route path="/landing" element={<LandingPage />} />
           <Route path="/systemService" element={<SystemService />} />
+          <Route path="/kioskNotifications" element={<KioskNotifications />} />
           <Route path="/classHistory" element={<ClassHistory />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
