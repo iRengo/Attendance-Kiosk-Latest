@@ -83,7 +83,9 @@ function BottomInfo({ studentCount = "N/A" }) {
 
         // Handle unrecognized: require continuous detection for ~1.5s before showing.
         try {
-          if (data && data.status === 'unknown' && detected > 0 && !(teacherDetected && teacherDetected.status === 'success')) {
+          // Only let a teacher match block unrecognized in the pre-session state.
+          const teacherBlocks = teacherDetected && teacherDetected.status === 'success' && !(sessionInfo && sessionInfo.class_id);
+          if (data && data.status === 'unknown' && detected > 0 && !teacherBlocks) {
             if (!recognitionStartRef.current) {
               recognitionStartRef.current = Date.now();
             } else {
@@ -92,16 +94,14 @@ function BottomInfo({ studentCount = "N/A" }) {
                 setUnrecognized(true);
                 // show default avatar when an unidentified face is detected
                 setStudentProfileUrl(null);
-                if (recognitionClearTimerRef.current) {
-                  clearTimeout(recognitionClearTimerRef.current);
-                }
-                recognitionClearTimerRef.current = setTimeout(() => { setUnrecognized(false); recognitionClearTimerRef.current = null; }, 3000);
+                // keep the unrecognized flag until detection goes away (detect==0) or status changes
                 recognitionStartRef.current = null;
               }
             }
           } else {
             recognitionStartRef.current = null;
-            if (!(data && data.status === 'unknown')) {
+            // Clear unrecognized when there is no active unknown detection or no faces present
+            if (!(data && data.status === 'unknown' && detected > 0)) {
               setUnrecognized(false);
             }
           }

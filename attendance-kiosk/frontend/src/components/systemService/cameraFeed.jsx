@@ -258,13 +258,12 @@ function CameraFeed() {
         const elapsed = Date.now() - recognitionStartRef.current;
         if (elapsed >= 1500) {
           // after 1.5s of continuous detection, if no teacher/student match exists, mark unrecognized
-          if (!(teacherDetected && teacherDetected.status === 'success') && !(studentDetected && studentDetected.status === 'success')) {
+          // NOTE: only treat a teacher match as blocking unrecognized when NOT in an active session
+          const teacherBlocks = teacherDetected && teacherDetected.status === 'success' && !(sessionInfo && sessionInfo.class_id);
+          if (!teacherBlocks && !(studentDetected && studentDetected.status === 'success')) {
             // set local unrecognized indicator (this will also be set by backend in some cases)
+            // keep the banner visible while a face remains in frame; clearing is handled by detectCount===0
             setUnrecognizedDetected(true);
-            // clear after 3s so banner isn't permanent
-            try {
-              recognitionClearTimerRef.current = setTimeout(() => { try { setUnrecognizedDetected(false); } catch (e) {} }, 3000);
-            } catch (e) {}
             // reset start so we don't retrigger immediately
             recognitionStartRef.current = null;
           }
@@ -277,6 +276,16 @@ function CameraFeed() {
 
     return () => { mounted = false; };
   }, [detectCount, teacherDetected, studentDetected, sessionInfo, stopPending]);
+
+  // Clear unrecognized banner when no faces are detected anymore
+  useEffect(() => {
+    if (detectCount === 0) {
+      try {
+        setUnrecognizedDetected(false);
+      } catch (e) {}
+      recognitionStartRef.current = null;
+    }
+  }, [detectCount]);
 
   // Poll current attendance (list of present student IDs) and resolve names from backend
   useEffect(() => {
@@ -337,10 +346,11 @@ function CameraFeed() {
   }, []);
 
   // derive overlay state
-  // Three-phase behavior when no active session:
-  //  - default: "Detecting faces..."
-  //  - when a face is present (and it's NOT a known student before session): "Recognizing face..."
-  //  - if a student face is detected before a session is active, keep showing "Detecting faces..." (ignore student matches)
+  // Priority order:
+  //  - pending_stop, active session
+  //  - teacher not registered / teacher recognized (presession)
+  //  - unrecognized (prominent red banner) when backend/local signal set
+  //  - recognizing when faces present but no match
   let overlay = { state: "ready", label: "Detecting faces..." };
   if (stopPending) {
     overlay = { state: "pending_stop", label: "Scan face to stop service" };
@@ -349,7 +359,11 @@ function CameraFeed() {
   } else if (teacherDetected && teacherRegistered === false) {
     overlay = { state: "not_registered", label: "You are not registered in this room" };
   } else if (teacherDetected) {
+    // If a teacher is recognized, prefer showing the teacher (presession start flow)
     overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
+  } else if (unrecognizedDetected) {
+    // show unrecognized prominently (red outline)
+    overlay = { state: "unrecognized", label: "Unidentified face detected" };
   } else if (
     // show "Recognizing face..." only when there is at least one detected face
     // and that detection isn't a pre-session student match (we ignore student faces before session)
@@ -363,6 +377,7 @@ function CameraFeed() {
     ready: "bg-white",
     recognizing: "bg-yellow-300",
     recognized: "bg-yellow-400",
+    unrecognized: "bg-red-500",
     active: "bg-red-500",
     pending_stop: "bg-blue-400",
     not_registered: "bg-red-500",
@@ -372,6 +387,7 @@ function CameraFeed() {
     ready: "text-white",
     recognizing: "text-yellow-300",
     recognized: "text-yellow-400",
+    unrecognized: "text-red-400",
     active: "text-green-400",
     pending_stop: "text-blue-400",
     not_registered: "text-red-400",
@@ -381,6 +397,7 @@ function CameraFeed() {
     ready: "border-white",
     recognizing: "border-yellow-300",
     recognized: "border-yellow-400",
+    unrecognized: "border-red-500",
     active: "border-green-400",
     pending_stop: "border-blue-400",
     not_registered: "border-red-400",
@@ -391,8 +408,11 @@ function CameraFeed() {
     try {
       const res = await axios.get(`${API_BASE}/session/classes?teacher_id=${encodeURIComponent(teacherDetected.id)}`);
       const cls = (res.data && res.data.classes) || [];
-      setClassesList(cls);
-      setSelectedClass(cls.length > 0 ? cls[0].id : "");
+      // backend now returns disabledToday flag for classes that already have a session started today
+      const annotated = cls.map((c) => ({ ...c, disabledToday: !!c.disabledToday }));
+      setClassesList(annotated);
+      const firstEnabled = annotated.find((c) => !c.disabledToday);
+      setSelectedClass(firstEnabled ? firstEnabled.id : (annotated.length > 0 ? annotated[0].id : ""));
       // fire an update event so RoomInfo can refresh immediately (or accept the assignedRoomId from detail)
       try {
         const dres = await axios.get(`${API_BASE}/device/info`);
@@ -511,70 +531,76 @@ function CameraFeed() {
 
         {/* Status overlay - bottom center */}
         <div className="absolute left-1/2 transform -translate-x-1/2 bottom-4 z-40">
-          {/* When recognized, make overlay clickable to start service */}
-          {overlay.state === 'recognized' ? (
-            <button
-              onClick={openClassModal}
-              className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
-              style={{ borderWidth: 1 }}
-              aria-label="Start service for recognized teacher"
-            >
-              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-              <span className={`font-medium ${textClass}`}>{overlay.label} — Start service</span>
-            </button>
-          ) : overlay.state === 'active' ? (
-            <button
-              onClick={() => setShowStopConfirm(true)}
-              className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
-              style={{ borderWidth: 1 }}
-              aria-label="Service active - stop service"
-            >
-              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-            </button>
-          ) : overlay.state === 'pending_stop' ? (
-            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-            </div>
-          ) : overlay.state === 'recognizing' ? (
-            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-            </div>
-          ) : overlay.state === 'pending_stop' ? (
-            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
-              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-            </div>
-          ) : (
-            // default / ready state
-            <div>
-              {overlay.state === 'ready' && (
-                (unrecognizedDetected) ||
-                (
-                  detectCount > 0 &&
-                  // don't show if teacher is matched
-                  !(teacherDetected && teacherDetected.status === 'success') &&
-                  // don't show if student is matched OR if a student match exists in the DB
-                  // (recognize-camera can return status 'service_inactive' when no active class,
-                  // but the endpoint also exposes `known` when a face matched a student/teacher record).
-                  !(studentDetected && (studentDetected.status === 'success' || studentDetected.known))
-                )
-              ) ? (
-                // Show a prominent unrecognized message similar to the recognized state
-                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-yellow-600/90 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-                  <span className={`inline-block w-3 h-3 rounded-full bg-white`} aria-hidden="true" />
-                  <span className={`font-medium text-white`}>Unidentified face detected</span>
+          {/* When recognized or otherwise, render a single overlay block via branches - clearer than nested ternaries */}
+          {(() => {
+            if (overlay.state === 'recognized') {
+              return (
+                <button
+                  onClick={openClassModal}
+                  className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
+                  style={{ borderWidth: 1 }}
+                  aria-label="Start service for recognized teacher"
+                >
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label} — Start service</span>
+                </button>
+              );
+            }
+            if (overlay.state === 'active') {
+              return (
+                <button
+                  onClick={() => setShowStopConfirm(true)}
+                  className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass} cursor-pointer`}
+                  style={{ borderWidth: 1 }}
+                  aria-label="Service active - stop service"
+                >
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+                </button>
+              );
+            }
+            if (overlay.state === 'pending_stop') {
+              return (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
                 </div>
-              ) : (
+              );
+            }
+            if (overlay.state === 'recognizing') {
+              return (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+                </div>
+              );
+            }
+            if (overlay.state === 'unrecognized') {
+              return (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-transparent backdrop-blur-sm border border-red-500`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full bg-red-500`} aria-hidden="true" />
+                  <span className={`font-medium text-red-400`}>{overlay.label}</span>
+                </div>
+              );
+            }
+            if (overlay.state === 'not_registered') {
+              return (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+                </div>
+              );
+            }
+            // default / ready
+            return (
+              <div>
                 <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
                   <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
                   <span className={`font-medium ${textClass}`}>{overlay.label}</span>
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            );
+          })()}
         </div>
 
         {/* Keep modals here (they are fixed and will overlay viewport as before) */}
@@ -593,7 +619,9 @@ function CameraFeed() {
                   <option value="">No classes</option>
                 ) : (
                   classesList.map((c) => (
-                    <option key={c.id} value={c.id}>{(c.subjectName || c.name || "Untitled")} — {`${c.gradeLevel || ''} ${c.section || ''}`.trim()}</option>
+                    <option key={c.id} value={c.id} disabled={!!c.disabledToday}>
+                      {(c.subjectName || c.name || "Untitled")} — {`${c.gradeLevel || ''} ${c.section || ''}`.trim()}{c.disabledToday ? ' (started today)' : ''}
+                    </option>
                   ))
                 )}
               </select>
@@ -610,7 +638,7 @@ function CameraFeed() {
                   type="button"
                   className={`px-3 py-1 text-sm rounded ml-2 ${selectedClass && !isStarting ? 'bg-green-600 text-white hover:bg-green-700' : 'bg-gray-600 text-gray-300 opacity-60 cursor-not-allowed'}`}
                   onClick={startService}
-                  aria-disabled={!selectedClass || isStarting}
+                  aria-disabled={!selectedClass || isStarting || (classesList.find((x) => x.id === selectedClass) || {}).disabledToday}
                 >{isStarting ? 'Starting...' : 'Confirm'}</button>
               </div>
             </div>
