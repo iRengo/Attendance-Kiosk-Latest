@@ -20,6 +20,9 @@ function CameraFeed() {
   const [teacherRegistered, setTeacherRegistered] = useState(null); // null=unknown, true/false known
   const stopTimerRef = useRef(null);
   const prevSessionRef = useRef(null);
+  // recognition stability: require person to hold still for ~1.5s
+  const recognitionStartRef = useRef(null);
+  const recognitionClearTimerRef = useRef(null);
 
   // Check whether the recognized teacher is registered/assigned to this kiosk's room
   useEffect(() => {
@@ -99,6 +102,9 @@ function CameraFeed() {
   const [presentStudentIds, setPresentStudentIds] = useState([]);
   const [presentStudents, setPresentStudents] = useState([]);
   const presentIdsRef = useRef([]);
+  const [unrecognizedDetected, setUnrecognizedDetected] = useState(false);
+  const [detectCount, setDetectCount] = useState(0);
+  const [studentDetected, setStudentDetected] = useState(null);
 
   useEffect(() => {
     let canceled = false;
@@ -174,6 +180,104 @@ function CameraFeed() {
     return () => { mounted = false; clearInterval(sid); clearInterval(tid); };
   }, []);
 
+  // Poll for unrecognized face signal (display-only). Keep this separate
+  // from the teacher/student polls so we don't affect their timing.
+  useEffect(() => {
+    let mounted = true;
+    const pollUnrecognized = async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/unrecognized`);
+        if (!mounted) return;
+        const d = res.data || {};
+        const now = Date.now() / 1000;
+        if (d && d.status === 'unrecognized' && d.ts && (now - d.ts) < 10) {
+          setUnrecognizedDetected(true);
+        } else {
+          setUnrecognizedDetected(false);
+        }
+      } catch (e) {
+        if (mounted) setUnrecognizedDetected(false);
+      }
+    };
+    pollUnrecognized();
+    const uid = setInterval(pollUnrecognized, 1200);
+
+    // also poll /detect for immediate face presence updates
+    const pollDetect = async () => {
+      try {
+        const r = await axios.get(`${API_BASE}/detect`);
+        if (!mounted) return;
+        const dd = r.data || {};
+        setDetectCount(Number(dd.faces || 0));
+      } catch (e) {
+        if (mounted) setDetectCount(0);
+      }
+    };
+    pollDetect();
+    const did = setInterval(pollDetect, 700);
+
+    // also poll recognize-camera to see if there's a student match (fast)
+    const pollStudent = async () => {
+      try {
+        const r2 = await axios.get(`${API_BASE}/recognize-camera`);
+        if (!mounted) return;
+        setStudentDetected(r2.data || null);
+      } catch (e) {
+        if (mounted) setStudentDetected(null);
+      }
+    };
+    pollStudent();
+    const sid2 = setInterval(pollStudent, 800);
+
+    return () => { mounted = false; clearInterval(uid); clearInterval(did); clearInterval(sid2); };
+  }, []);
+
+  // require stability (hold-still) before declaring an unrecognized face
+  useEffect(() => {
+    let mounted = true;
+    // clear any existing clear timer
+    try {
+      if (recognitionClearTimerRef.current) {
+        clearTimeout(recognitionClearTimerRef.current);
+        recognitionClearTimerRef.current = null;
+      }
+    } catch (e) {}
+
+    // If there's an active session or stopPending, reset
+    if (sessionInfo && sessionInfo.class_id) {
+      recognitionStartRef.current = null;
+      return () => { mounted = false; };
+    }
+
+    // If a face is detected and it's not a pre-session student match, start/continue the stability timer
+    const isPreSessionStudent = studentDetected && (studentDetected.status === 'success' || studentDetected.known);
+    if (detectCount > 0 && !isPreSessionStudent) {
+      if (!recognitionStartRef.current) {
+        recognitionStartRef.current = Date.now();
+      } else {
+        const elapsed = Date.now() - recognitionStartRef.current;
+        if (elapsed >= 1500) {
+          // after 1.5s of continuous detection, if no teacher/student match exists, mark unrecognized
+          if (!(teacherDetected && teacherDetected.status === 'success') && !(studentDetected && studentDetected.status === 'success')) {
+            // set local unrecognized indicator (this will also be set by backend in some cases)
+            setUnrecognizedDetected(true);
+            // clear after 3s so banner isn't permanent
+            try {
+              recognitionClearTimerRef.current = setTimeout(() => { try { setUnrecognizedDetected(false); } catch (e) {} }, 3000);
+            } catch (e) {}
+            // reset start so we don't retrigger immediately
+            recognitionStartRef.current = null;
+          }
+        }
+      }
+    } else {
+      // no face or pre-session student: reset stability tracking
+      recognitionStartRef.current = null;
+    }
+
+    return () => { mounted = false; };
+  }, [detectCount, teacherDetected, studentDetected, sessionInfo, stopPending]);
+
   // Poll current attendance (list of present student IDs) and resolve names from backend
   useEffect(() => {
     let mounted = true;
@@ -233,7 +337,11 @@ function CameraFeed() {
   }, []);
 
   // derive overlay state
-  let overlay = { state: "ready", label: "Ready to Scan Teacher Face" };
+  // Three-phase behavior when no active session:
+  //  - default: "Detecting faces..."
+  //  - when a face is present (and it's NOT a known student before session): "Recognizing face..."
+  //  - if a student face is detected before a session is active, keep showing "Detecting faces..." (ignore student matches)
+  let overlay = { state: "ready", label: "Detecting faces..." };
   if (stopPending) {
     overlay = { state: "pending_stop", label: "Scan face to stop service" };
   } else if (sessionInfo && sessionInfo.class_id) {
@@ -242,10 +350,18 @@ function CameraFeed() {
     overlay = { state: "not_registered", label: "You are not registered in this room" };
   } else if (teacherDetected) {
     overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
+  } else if (
+    // show "Recognizing face..." only when there is at least one detected face
+    // and that detection isn't a pre-session student match (we ignore student faces before session)
+    detectCount > 0 &&
+    !(studentDetected && (studentDetected.status === 'success' || studentDetected.known))
+  ) {
+    overlay = { state: "recognizing", label: "Recognizing face..." };
   }
 
   const circleClass = {
     ready: "bg-white",
+    recognizing: "bg-yellow-300",
     recognized: "bg-yellow-400",
     active: "bg-red-500",
     pending_stop: "bg-blue-400",
@@ -254,6 +370,7 @@ function CameraFeed() {
 
   const textClass = {
     ready: "text-white",
+    recognizing: "text-yellow-300",
     recognized: "text-yellow-400",
     active: "text-green-400",
     pending_stop: "text-blue-400",
@@ -262,6 +379,7 @@ function CameraFeed() {
 
   const borderClass = {
     ready: "border-white",
+    recognizing: "border-yellow-300",
     recognized: "border-yellow-400",
     active: "border-green-400",
     pending_stop: "border-blue-400",
@@ -419,10 +537,42 @@ function CameraFeed() {
               <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
               <span className={`font-medium ${textClass}`}>{overlay.label}</span>
             </div>
-          ) : (
-            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+          ) : overlay.state === 'recognizing' ? (
+            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
               <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
               <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+            </div>
+          ) : overlay.state === 'pending_stop' ? (
+            <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+              <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+              <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+            </div>
+          ) : (
+            // default / ready state
+            <div>
+              {overlay.state === 'ready' && (
+                (unrecognizedDetected) ||
+                (
+                  detectCount > 0 &&
+                  // don't show if teacher is matched
+                  !(teacherDetected && teacherDetected.status === 'success') &&
+                  // don't show if student is matched OR if a student match exists in the DB
+                  // (recognize-camera can return status 'service_inactive' when no active class,
+                  // but the endpoint also exposes `known` when a face matched a student/teacher record).
+                  !(studentDetected && (studentDetected.status === 'success' || studentDetected.known))
+                )
+              ) ? (
+                // Show a prominent unrecognized message similar to the recognized state
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-yellow-600/90 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full bg-white`} aria-hidden="true" />
+                  <span className={`font-medium text-white`}>Unidentified face detected</span>
+                </div>
+              ) : (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+                </div>
+              )}
             </div>
           )}
         </div>

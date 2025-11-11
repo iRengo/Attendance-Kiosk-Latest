@@ -13,6 +13,11 @@ function BottomInfo({ studentCount = "N/A" }) {
   const lastStudentRef = React.useRef(null);
   const [presentCount, setPresentCount] = useState(0);
   const [time, setTime] = useState(new Date());
+  const [unrecognized, setUnrecognized] = useState(false);
+  const [teacherDetected, setTeacherDetected] = useState(null);
+  // recognition stability refs (require ~1.5s hold-still before declaring unrecognized)
+  const recognitionStartRef = React.useRef(null);
+  const recognitionClearTimerRef = React.useRef(null);
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
@@ -20,80 +25,122 @@ function BottomInfo({ studentCount = "N/A" }) {
   }, []);
 
   useEffect(() => {
-    // Poll only when a session is active (sessionInfo.class_id present). Otherwise show Not Available.
+    // Only run recognition polling when a session is active. When no session is active,
+    // BottomInfo should show the default "Not Available / Service inactive" values.
     let mounted = true;
+
+    if (!(sessionInfo && sessionInfo.class_id)) {
+      // No active session: reset UI and do not poll recognize-camera
+      lastStudentRef.current = null;
+      setStudentName('Not Available');
+      setStudentStatus('Service inactive');
+      setStudentId(null);
+      setStudentProfileUrl(null);
+      setUnrecognized(false);
+      // clear any pending timers
+      try { if (recognitionClearTimerRef.current) { clearTimeout(recognitionClearTimerRef.current); recognitionClearTimerRef.current = null; } } catch (e) {}
+      recognitionStartRef.current = null;
+      return () => { mounted = false; };
+    }
+
+    // Session is active: poll recognize-camera and apply existing behavior + stability logic.
     const poll = async () => {
       if (!mounted) return;
-      if (!(sessionInfo && sessionInfo.class_id)) {
-        // no active session: show Not Available
-        setStudentName("Not Available");
-        setStudentStatus("Service inactive");
-        return;
-      } else {
-        // session active but no recognized student yet: show detecting
-        if (!lastStudentRef.current) {
-          setStudentName("Detecting faces...");
-          setStudentStatus("Detecting faces...");
-        }
-      }
-
       try {
         const res = await axios.get(`${API_BASE}/recognize-camera`);
         const data = res.data || {};
-        // Persist last recognized student until a different student is recognized. Clear on session end.
-        if (data && data.id && (data.status === "success" || data.status === "denied")) {
-          // new detection or changed id
+        const detected = (typeof data.detected !== 'undefined') ? Number(data.detected) : 0;
+
+        // session active but no recognized student yet: show detecting
+        if (!lastStudentRef.current) {
+          setStudentName('Detecting faces...');
+          setStudentStatus('Detecting faces...');
+        }
+
+        // Persist last recognized student until a different student is recognized.
+        if (data && data.id && (data.status === 'success' || data.status === 'denied')) {
           if (!lastStudentRef.current || String(lastStudentRef.current.id) !== String(data.id) || lastStudentRef.current.status !== data.status) {
             lastStudentRef.current = data;
-            // If recognition reports denied or not registered, show denied state
-            const isDenied = data.status === "denied" || data.registered === false;
-            setStudentName(data.name || (isDenied ? "Unknown" : "Unknown"));
+            const isDenied = data.status === 'denied' || data.registered === false;
+            setStudentName(data.name || (isDenied ? 'Unknown' : 'Unknown'));
             if (isDenied) {
-              setStudentStatus("Denied - Not registered");
+              setStudentStatus('Denied - Not registered');
               setStudentId(data.id || null);
-              // Keep the default avatar when the student is denied / not registered
-              // (do not set a profile URL so the SVG placeholder remains visible)
               setStudentProfileUrl(null);
             } else {
-              // successful and registered
-              setStudentStatus("Present");
+              setStudentStatus('Present');
               setStudentId(data.id || null);
               setStudentProfileUrl(data.profilePicUrl ? (data.profilePicUrl.startsWith('/') ? `${API_BASE}${data.profilePicUrl}` : data.profilePicUrl) : (data.id ? `${API_BASE}/photos/students/${data.id}.jpg` : null));
-              // mark student present on server (idempotent on backend)
               try {
                 const m = await axios.post(`${API_BASE}/session/mark`, { student_id: data.id, student_name: data.name });
                 if (m.data && Array.isArray(m.data.studentsPresent)) {
                   setPresentCount(m.data.studentsPresent.length);
                 }
-              } catch (e) {
-                // ignore mark errors
-              }
-            }
-          }
-        } else {
-          // no valid detection this tick: keep showing detecting while session active
-          if (sessionInfo && sessionInfo.class_id) {
-            if (!lastStudentRef.current) {
-              setStudentName("Detecting faces...");
-              setStudentStatus("Detecting faces...");
+              } catch (e) {}
             }
           }
         }
+
+        // Handle unrecognized: require continuous detection for ~1.5s before showing.
+        try {
+          if (data && data.status === 'unknown' && detected > 0 && !(teacherDetected && teacherDetected.status === 'success')) {
+            if (!recognitionStartRef.current) {
+              recognitionStartRef.current = Date.now();
+            } else {
+              const elapsed = Date.now() - recognitionStartRef.current;
+              if (elapsed >= 1500) {
+                setUnrecognized(true);
+                // show default avatar when an unidentified face is detected
+                setStudentProfileUrl(null);
+                if (recognitionClearTimerRef.current) {
+                  clearTimeout(recognitionClearTimerRef.current);
+                }
+                recognitionClearTimerRef.current = setTimeout(() => { setUnrecognized(false); recognitionClearTimerRef.current = null; }, 3000);
+                recognitionStartRef.current = null;
+              }
+            }
+          } else {
+            recognitionStartRef.current = null;
+            if (!(data && data.status === 'unknown')) {
+              setUnrecognized(false);
+            }
+          }
+        } catch (e) {
+          recognitionStartRef.current = null;
+        }
+
       } catch (err) {
         console.error(err);
       }
     };
 
-    // use a repeating interval while mounted; interval function checks session state each tick
-    const id = setInterval(poll, 100); // ~10 FPS when active
+    const id = setInterval(poll, 100);
     // run immediately once
     poll();
 
     return () => {
       mounted = false;
       clearInterval(id);
+      try { if (recognitionClearTimerRef.current) clearTimeout(recognitionClearTimerRef.current); } catch (e) {}
     };
-  }, [sessionInfo]);
+  }, [sessionInfo, teacherDetected]);
+
+  // Poll recognize-teacher at a low rate so BottomInfo can know if a teacher was matched
+  useEffect(() => {
+    let mounted = true;
+    const fetchTeacher = async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/recognize-teacher`);
+        if (!mounted) return;
+        setTeacherDetected(res.data || null);
+      } catch (e) {
+        if (mounted) setTeacherDetected(null);
+      }
+    };
+    fetchTeacher();
+    const tid = setInterval(fetchTeacher, 1500);
+    return () => { mounted = false; clearInterval(tid); };
+  }, []);
 
   // Clear persisted student when session ends immediately
   useEffect(() => {
@@ -105,6 +152,10 @@ function BottomInfo({ studentCount = "N/A" }) {
       setStudentProfileUrl(null);
     }
   }, [sessionInfo]);
+
+  // derive display fields (show unrecognized state when session active)
+  const displayName = (sessionInfo && sessionInfo.class_id && unrecognized) ? 'Unidentified face detected' : studentName;
+  const displayStatus = (sessionInfo && sessionInfo.class_id && unrecognized) ? 'Unidentified' : studentStatus;
 
   // Poll for recognized teacher (low rate)
   // Note: start/stop flow moved into CameraFeed overlay. BottomInfo no longer polls for teacher detection.
@@ -161,8 +212,8 @@ function BottomInfo({ studentCount = "N/A" }) {
           )}
         </div>
         <div>
-          <p className="font-bold text-left">{studentName}</p>
-          <p className="text-left text-gray-400">{studentStatus}</p>
+          <p className="font-bold text-left">{displayName}</p>
+          <p className="text-left text-gray-400">{displayStatus}</p>
         </div>
       </div>
       <div className="flex justify-center ml-25">

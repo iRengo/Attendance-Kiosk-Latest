@@ -62,7 +62,34 @@ export default function KioskNotifications() {
       try {
         const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
         const res = await axios.get(`${API_BASE}/kiosk_notifications`);
-        const items = (res.data && res.data.notifications) || [];
+        // backend may return either a bare array or { notifications: [...] }
+        let items = [];
+        if (res && res.data) {
+          if (Array.isArray(res.data)) items = res.data;
+          else if (Array.isArray(res.data.notifications)) items = res.data.notifications;
+        }
+
+        // normalize items: ensure image_url is set from details.image_path when available
+        items = items.map((it) => {
+          const copy = { ...it };
+          try {
+            const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+            if (!copy.image_url && copy.details) {
+              const dp = copy.details.image_path || (copy.details.imageUrl || copy.details.image_url);
+              if (dp) {
+                // if path already looks absolute, keep; otherwise prefix API base
+                if (dp.startsWith("http://") || dp.startsWith("https://")) copy.image_url = dp;
+                else copy.image_url = `${API_BASE}${dp}`;
+              }
+            }
+          } catch (e) {
+            // ignore mapping errors
+          }
+          // ensure timestamp exists
+          if (!copy.timestamp) copy.timestamp = copy.createdAt || new Date().toISOString();
+          return copy;
+        });
+
         setNotes(items);
       } catch (e) {
         console.error('Failed to load notifications', e);
