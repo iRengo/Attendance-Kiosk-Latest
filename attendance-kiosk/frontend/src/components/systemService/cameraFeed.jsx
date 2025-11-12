@@ -24,78 +24,24 @@ function CameraFeed() {
   const recognitionStartRef = useRef(null);
   const recognitionClearTimerRef = useRef(null);
 
-  // Check whether the recognized teacher is registered/assigned to this kiosk's room
+  // Use the `assigned` flag returned by /recognize-teacher to set teacherRegistered.
+  // This replaces the old rooms-based lookup and relies solely on the classes table
+  // check performed server-side.
   useEffect(() => {
-    let mounted = true;
-    const checkRegistration = async () => {
-      // reset if no teacher recognized
-      if (!teacherDetected) {
-        if (mounted) setTeacherRegistered(null);
-        return;
+    if (!teacherDetected) {
+      setTeacherRegistered(null);
+      return;
+    }
+    try {
+      // when recognition returns an assigned flag, use it; otherwise leave unknown
+      if (Object.prototype.hasOwnProperty.call(teacherDetected, 'assigned')) {
+        setTeacherRegistered(teacherDetected.assigned === true ? true : false);
+      } else {
+        setTeacherRegistered(null);
       }
-
-      try {
-        // 1) get device info to resolve assignedRoomId
-        const dres = await axios.get(`${API_BASE}/device/info`);
-        const dk = (dres.data && (dres.data.kiosk || dres.data.device)) || dres.data || null;
-        const assigned = dk && (dk.assignedRoomId ?? dk.assignedRoom ?? dk.roomId ?? dk.assignedRoomName);
-
-        // 2) fetch rooms and find matching room by fs_id or kiosk linkage
-        let rooms = [];
-        try {
-          // try kiosk-specific query first (if we have a kiosk id)
-          const kioskId = dk && (dk.id || dk.fs_id || dk.kioskId);
-          if (kioskId) {
-            const rres = await axios.get(`${API_BASE}/rooms?kioskid=${encodeURIComponent(kioskId)}`);
-            rooms = (rres.data && rres.data.rooms) || [];
-          }
-        } catch (e) {
-          // fallthrough to global rooms query
-        }
-
-        if ((!rooms || rooms.length === 0) && assigned) {
-          try {
-            const rres2 = await axios.get(`${API_BASE}/rooms`);
-            rooms = (rres2.data && rres2.data.rooms) || [];
-          } catch (e) {
-            rooms = [];
-          }
-        }
-
-        // find the room that matches assignedRoomId if present, otherwise try first room
-        let matched = null;
-        if (assigned && rooms && rooms.length > 0) {
-          matched = rooms.find((r) => String(r.fs_id) === String(assigned) || String(r.fs_id) === String(assigned));
-        }
-        if (!matched && rooms && rooms.length > 0) matched = rooms[0];
-
-        // determine if teacher id appears in assignedteachers JSON or in raw_doc
-        let registered = null;
-        if (matched) {
-          try {
-            const at = matched.assignedteachers || matched.assignedTeachers || null;
-            if (at) {
-              let arr = [];
-              try { arr = JSON.parse(at); } catch (e) { arr = Array.isArray(at) ? at : [] }
-              registered = arr.map((x) => String(x)).includes(String(teacherDetected.id));
-            }
-            // fallback: check raw_doc string for teacher id (best-effort)
-            if (!registered && matched.raw_doc && typeof matched.raw_doc === 'string') {
-              registered = String(matched.raw_doc).indexOf(String(teacherDetected.id)) !== -1;
-            }
-          } catch (e) {
-            registered = null;
-          }
-        }
-
-        if (mounted) setTeacherRegistered(registered === true ? true : false);
-      } catch (e) {
-        if (mounted) setTeacherRegistered(null);
-      }
-    };
-
-    checkRegistration();
-    return () => { mounted = false; };
+    } catch (e) {
+      setTeacherRegistered(null);
+    }
   }, [teacherDetected]);
   const [toast, setToast] = useState(null);
   const toastTimerRef = useRef(null);
@@ -105,6 +51,7 @@ function CameraFeed() {
   const [unrecognizedDetected, setUnrecognizedDetected] = useState(false);
   const [detectCount, setDetectCount] = useState(0);
   const [studentDetected, setStudentDetected] = useState(null);
+  const [spoofDetected, setSpoofDetected] = useState(false);
 
   useEffect(() => {
     let canceled = false;
@@ -184,6 +131,26 @@ function CameraFeed() {
   // from the teacher/student polls so we don't affect their timing.
   useEffect(() => {
     let mounted = true;
+    const pollSpoof = async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/anti_spoof`);
+        if (!mounted) return;
+        const d = res.data || {};
+        if (d && d.status === 'spoof' && d.ts) {
+          // show spoof immediately
+          setUnrecognizedDetected(false); // prefer spoof over unrecognized
+          setDetectCount((c) => c); // no-op but keep detectCount in sync
+          // reuse unrecognized state variable to indicate an active alert is present
+          // but keep a separate state for spoof below
+          setSpoofDetected(true);
+        } else {
+          setSpoofDetected(false);
+        }
+      } catch (e) {
+        if (mounted) setSpoofDetected(false);
+      }
+    };
+
     const pollUnrecognized = async () => {
       try {
         const res = await axios.get(`${API_BASE}/unrecognized`);
@@ -227,10 +194,14 @@ function CameraFeed() {
       }
     };
     pollStudent();
-    const sid2 = setInterval(pollStudent, 800);
+  const sid2 = setInterval(pollStudent, 800);
+  // start spoof poll
+  pollSpoof();
+  const spid = setInterval(pollSpoof, 1000);
 
-    return () => { mounted = false; clearInterval(uid); clearInterval(did); clearInterval(sid2); };
+    return () => { mounted = false; clearInterval(uid); clearInterval(did); clearInterval(sid2); clearInterval(spid); };
   }, []);
+
 
   // require stability (hold-still) before declaring an unrecognized face
   useEffect(() => {
@@ -349,6 +320,7 @@ function CameraFeed() {
   // Priority order:
   //  - pending_stop, active session
   //  - teacher not registered / teacher recognized (presession)
+  //  - spoof detected (anti-spoof)
   //  - unrecognized (prominent red banner) when backend/local signal set
   //  - recognizing when faces present but no match
   let overlay = { state: "ready", label: "Detecting faces..." };
@@ -358,8 +330,18 @@ function CameraFeed() {
     overlay = { state: "active", label: "Active" };
   } else if (teacherDetected && teacherRegistered === false) {
     overlay = { state: "not_registered", label: "You are not registered in this room" };
+  }
+  // If we're not in an active session, show spoof alerts before showing a recognized teacher
+  else if (!sessionInfo || !sessionInfo.class_id) {
+    if (spoofDetected) {
+      // Spoofing detected: show urgent message
+      overlay = { state: "spoof", label: "Fake/spoof face detected" };
+    } else if (teacherDetected) {
+      // If a teacher is recognized, prefer showing the teacher (presession start flow)
+      overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
+    }
   } else if (teacherDetected) {
-    // If a teacher is recognized, prefer showing the teacher (presession start flow)
+    // If a teacher is recognized during an active session fallthrough (still show teacher info)
     overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
   } else if (unrecognizedDetected) {
     // show unrecognized prominently (red outline)
@@ -391,6 +373,7 @@ function CameraFeed() {
     active: "text-green-400",
     pending_stop: "text-blue-400",
     not_registered: "text-red-400",
+    spoof: "text-white",
   }[overlay.state];
 
   const borderClass = {
@@ -401,13 +384,24 @@ function CameraFeed() {
     active: "border-green-400",
     pending_stop: "border-blue-400",
     not_registered: "border-red-400",
+    spoof: "border-yellow-400",
   }[overlay.state];
 
   const openClassModal = async () => {
     if (!teacherDetected) return;
+    if (spoofDetected) {
+      setToast("Fake/spoof face detected — cannot start service");
+      return;
+    }
     try {
-      const res = await axios.get(`${API_BASE}/session/classes?teacher_id=${encodeURIComponent(teacherDetected.id)}`);
-      const cls = (res.data && res.data.classes) || [];
+      // prefer classes returned with recognition when available (and assigned)
+      let cls = [];
+      if (teacherDetected && teacherDetected.assigned === true && Array.isArray(teacherDetected.classes) && teacherDetected.classes.length > 0) {
+        cls = teacherDetected.classes;
+      } else {
+        const res = await axios.get(`${API_BASE}/session/classes?teacher_id=${encodeURIComponent(teacherDetected.id)}`);
+        cls = (res.data && res.data.classes) || [];
+      }
       // backend now returns disabledToday flag for classes that already have a session started today
       const annotated = cls.map((c) => ({ ...c, disabledToday: !!c.disabledToday }));
       setClassesList(annotated);
@@ -433,6 +427,10 @@ function CameraFeed() {
 
   const startService = async () => {
     if (!selectedClass || !teacherDetected) return;
+    if (spoofDetected) {
+      setToast("Cannot start service while spoof detected");
+      return;
+    }
     setIsStarting(true);
     try {
       const cls = classesList.find((c) => c.id === selectedClass) || {};
@@ -472,6 +470,17 @@ function CameraFeed() {
     }
     prevSessionRef.current = cur;
   }, [sessionInfo]);
+
+  // Show a short toast when a spoof is detected before the session starts
+  useEffect(() => {
+    if (spoofDetected && !(sessionInfo && sessionInfo.class_id)) {
+      setToast("Fake/spoof face detected");
+      // clear toast after 3s
+      const t = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(t);
+    }
+    return undefined;
+  }, [spoofDetected, sessionInfo]);
 
   // auto-hide toast
   useEffect(() => {
@@ -534,6 +543,15 @@ function CameraFeed() {
           {/* When recognized or otherwise, render a single overlay block via branches - clearer than nested ternaries */}
           {(() => {
             if (overlay.state === 'recognized') {
+              // If spoof detected, disable the start button and show an explicit label
+              if (spoofDetected) {
+                return (
+                  <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-yellow-600/20 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                    <span className={`inline-block w-3 h-3 rounded-full bg-yellow-400`} aria-hidden="true" />
+                    <span className={`font-medium ${textClass}`}>Spoof detected</span>
+                  </div>
+                );
+              }
               return (
                 <button
                   onClick={openClassModal}
@@ -571,6 +589,14 @@ function CameraFeed() {
               return (
                 <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-white/5 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
                   <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
+                </div>
+              );
+            }
+            if (overlay.state === 'spoof') {
+              return (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-yellow-600/20 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full bg-yellow-400`} aria-hidden="true" />
                   <span className={`font-medium ${textClass}`}>{overlay.label}</span>
                 </div>
               );
