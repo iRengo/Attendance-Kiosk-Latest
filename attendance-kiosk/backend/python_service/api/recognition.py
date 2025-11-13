@@ -38,6 +38,14 @@ latest_frame_lock = threading.Lock()
 latest_teacher_result = {"status": "idle"}
 latest_student_result = {"status": "idle"}
 _worker_running = False
+# small state for unrecognized face signaling (display-only, rate-limited)
+latest_unrecognized_result = {"status": "idle"}
+_last_unrecog_ts = 0.0
+# anti-spoofing / liveness signal
+latest_spoof_result = {"status": "idle"}
+_last_spoof_ts = 0.0
+# lightweight detection cache (faces count + ts)
+latest_detection_result = {"faces": 0, "ts": 0.0, "known": False}
 TARGET_FPS = int(os.environ.get("CAP_FPS", 15))
 # Separate tunables for streaming (jpeg encode) and inference loop
 STREAM_FPS = int(os.environ.get("STREAM_FPS", TARGET_FPS))
@@ -265,6 +273,30 @@ def _infer_thread():
 				except Exception:
 					small = frame
 				faces = mdl.get(small)
+
+				# update detection cache
+				now = time.time()
+				try:
+					latest_detection_result.update({"faces": len(faces) if faces else 0, "ts": now, "known": False})
+				except Exception:
+					pass
+
+				if not faces or len(faces) == 0:
+					# no faces detected: surface this explicitly so UI can react
+					try:
+						latest_teacher_result.update({"status": "no_face"})
+					except Exception:
+						pass
+					try:
+						latest_student_result.update({"status": "no_face"})
+					except Exception:
+						pass
+					try:
+						latest_unrecognized_result.update({"status": "idle"})
+					except Exception:
+						pass
+					continue
+				# if we continue, detection known stays False (no faces)
 			except Exception:
 				faces = []
 
@@ -283,23 +315,102 @@ def _infer_thread():
 					except Exception:
 						tmatch = None
 					if tmatch:
-						# include profilePicUrl from DB if available
+						# include profilePicUrl and determine whether this teacher is assigned to the local kiosk room
 						pp = None
+						assigned_ok = None
+						classes_in_room = []
+						conn = None
 						try:
 							conn = state.get_db()
 							cur = conn.cursor()
-							cur.execute("SELECT profilePicUrl FROM teachers WHERE id = ?", (tmatch["id"],))
-							row = cur.fetchone()
-							if row and row[0]:
-								pp = row[0]
-							conn.close()
+							# profile pic
+							try:
+								cur.execute("SELECT profilePicUrl FROM teachers WHERE id = ?", (tmatch["id"],))
+								rpic = cur.fetchone()
+								if rpic and rpic[0]:
+									pp = rpic[0]
+							except Exception:
+								pp = None
+
+							# build room candidates from kiosks_fs and env
+							room_candidates = []
+							try:
+								cur.execute("SELECT assignedRoomId, raw_doc FROM kiosks_fs LIMIT 1")
+								krow = cur.fetchone()
+								if krow:
+									if krow[0]:
+										room_candidates.append(str(krow[0]))
+									raw = krow[1] if len(krow) > 1 else None
+									if raw:
+										try:
+											import json as _json
+											rj = _json.loads(raw)
+											if isinstance(rj, dict):
+												if 'roomNumber' in rj:
+													room_candidates.append(str(rj.get('roomNumber')))
+												if 'assignedRoom' in rj:
+													room_candidates.append(str(rj.get('assignedRoom')))
+										except Exception:
+											pass
+							except Exception:
+								pass
+							try:
+								env_room = os.environ.get('KIOSK_ROOM_NUMBER')
+								if env_room:
+									room_candidates.append(env_room)
+							except Exception:
+								pass
+							room_candidates = [c for c in [str(x).strip() for x in room_candidates if x] if c]
+
+							# If we have candidates, query classes for this teacher filtered by roomNumber
+							if room_candidates:
+								try:
+									placeholders = ",".join(["?"] * len(room_candidates))
+									sql = f"SELECT id, name, subjectName, gradeLevel, section, roomNumber FROM classes WHERE teacher_id = ? AND roomNumber IN ({placeholders})"
+									params = [tmatch["id"]] + room_candidates
+									cur.execute(sql, tuple(params))
+									crows = cur.fetchall()
+									if crows:
+										assigned_ok = True
+										for cr in crows:
+											classes_in_room.append({"id": cr[0], "name": cr[1], "subjectName": cr[2], "gradeLevel": cr[3], "section": cr[4], "roomNumber": cr[5] if len(cr) > 5 else None})
+									else:
+										assigned_ok = False
+								except Exception:
+									assigned_ok = False
+							else:
+								# no room candidates: leave assigned_ok as None (unknown) and optionally list all classes for this teacher
+								try:
+									cur.execute("SELECT id, name, subjectName, gradeLevel, section, roomNumber FROM classes WHERE teacher_id = ?", (tmatch["id"],))
+									crows = cur.fetchall()
+									for cr in crows:
+										classes_in_room.append({"id": cr[0], "name": cr[1], "subjectName": cr[2], "gradeLevel": cr[3], "section": cr[4], "roomNumber": cr[5] if len(cr) > 5 else None})
+								except Exception:
+									pass
 						except Exception:
+							pass
+						finally:
 							try:
 								if conn:
 									conn.close()
 							except Exception:
 								pass
-						latest_teacher_result.update({"status": "success", "id": tmatch["id"], "name": tmatch["name"], "score": tmatch.get("score"), "profilePicUrl": pp})
+
+						# final update: include assigned flag and classes when available
+						payload = {"status": "success", "id": tmatch["id"], "name": tmatch["name"], "score": tmatch.get("score"), "profilePicUrl": pp}
+						if assigned_ok is True:
+							payload["assigned"] = True
+							if classes_in_room:
+								payload["classes"] = classes_in_room
+						elif assigned_ok is False:
+							payload["assigned"] = False
+						# assigned_ok None -> unknown: omit assigned or set to None
+						latest_teacher_result.update(payload)
+						# mark detection as known (teacher matched)
+						try:
+							latest_detection_result.update({"known": True, "ts": time.time()})
+						except Exception:
+							pass
 					else:
 						latest_teacher_result.update({"status": "teacher_not_registered"})
 
@@ -342,6 +453,11 @@ def _infer_thread():
 										except Exception:
 											pass
 									latest_student_result.update({"status": "success", "id": student_id, "name": student_name, "registered": True, "profilePicUrl": pp})
+									# mark detection as known (student matched)
+									try:
+										latest_detection_result.update({"known": True, "ts": time.time()})
+									except Exception:
+										pass
 								else:
 									# student not registered for the active class
 									latest_student_result.update({"status": "denied", "reason": "not_registered", "id": student_id, "name": student_name, "registered": False})
@@ -355,6 +471,81 @@ def _infer_thread():
 								pass
 					else:
 						latest_student_result.update({"status": "unknown"})
+
+					# ensure detection-known info reflects any teacher/student match (covers service_inactive cases)
+					try:
+						known = None
+						if tmatch:
+							known = {"type": "teacher", "id": tmatch.get("id"), "name": tmatch.get("name"), "score": tmatch.get("score")}
+						elif smatch:
+							known = {"type": "student", "id": smatch.get("id"), "name": smatch.get("name"), "score": smatch.get("score")}
+						if known is not None:
+							try:
+								latest_detection_result.update({"known": known, "ts": time.time()})
+							except Exception:
+								pass
+					except Exception:
+						pass
+
+					# Unrecognized face: neither teacher nor student matched.
+					# Rate-limit notifications/signals so the UI isn't flooded.
+					try:
+						now = time.time()
+						try:
+							quiet = int(os.environ.get("UNRECOG_QUIET_SECONDS", "5"))
+						except Exception:
+							quiet = 5
+						# if neither matched and embedding exists, set unrecognized signal
+						if (not tmatch) and (not smatch) and emb is not None:
+							if now - _last_unrecog_ts > quiet:
+								_last_unrecog_ts = now
+								try:
+									latest_unrecognized_result.update({"status": "unrecognized", "ts": now})
+								except Exception:
+									pass
+						else:
+							# if matched, clear unrecognized signal
+							try:
+								latest_unrecognized_result.update({"status": "idle"})
+							except Exception:
+								pass
+
+						# Anti-spoof / liveness check (anti_fake1). If the face object or
+						# its extra attributes include an `anti_fake1` flag, expose it via
+						# latest_spoof_result so frontends can show a UI warning.
+						try:
+							# robustly attempt to read anti_fake1 from face attributes
+							anti_flag = None
+							try:
+								anti_flag = getattr(face, "anti_fake1", None)
+							except Exception:
+								anti_flag = None
+							# some runtimes may put extra attributes in a dict-like field
+							try:
+								if anti_flag is None and hasattr(face, "extra"):
+									ex = getattr(face, "extra")
+									if isinstance(ex, dict) and "anti_fake1" in ex:
+										anti_flag = ex.get("anti_fake1")
+							except Exception:
+								pass
+							# If we found a truthy anti_fake1 indicator, flag spoof
+								if anti_flag:
+									try:
+										latest_spoof_result.update({"status": "spoof", "ts": now, "method": "anti_fake1"})
+									except Exception:
+										pass
+							else:
+								# clear spoof when anti_fake1 not present
+								try:
+									latest_spoof_result.update({"status": "idle"})
+								except Exception:
+									pass
+						except Exception:
+							# swallow any errors reading spoof attributes
+							pass
+					except Exception:
+						# ignore unrecognized signaling failures
+						pass
 
 			# rate limit inference to roughly INFER_FPS
 			elapsed = time.time() - start
@@ -434,6 +625,18 @@ def recognize_teacher():
 	# Return latest cached teacher result for instant response
 	try:
 		res = dict(latest_teacher_result)
+		# include detection info so frontends can act on presence quickly
+		try:
+			res["detected"] = int(latest_detection_result.get("faces", 0))
+			res["detected_ts"] = float(latest_detection_result.get("ts", 0.0))
+			res["detected_known"] = bool(latest_detection_result.get("known", False))
+		except Exception:
+			pass
+		# include known info (student/teacher) when available
+		try:
+			res["known"] = latest_detection_result.get("known")
+		except Exception:
+			pass
 		# enrich with profilePicUrl from local DB when available
 		try:
 			if res.get("status") == "success" and res.get("id"):
@@ -464,6 +667,18 @@ def recognize_camera():
 	# Return latest cached student result for instant response
 	try:
 		res = dict(latest_student_result)
+		# include detection info so frontends can act on presence quickly
+		try:
+			res["detected"] = int(latest_detection_result.get("faces", 0))
+			res["detected_ts"] = float(latest_detection_result.get("ts", 0.0))
+			res["detected_known"] = bool(latest_detection_result.get("known", False))
+		except Exception:
+			pass
+		# include known info (student/teacher) when available
+		try:
+			res["known"] = latest_detection_result.get("known")
+		except Exception:
+			pass
 		# enrich with profilePicUrl from local DB when available
 		try:
 			if res.get("status") == "success" and res.get("id"):
@@ -482,5 +697,38 @@ def recognize_camera():
 		except Exception:
 			pass
 		return res
+	except Exception as e:
+		return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.get("/unrecognized")
+def unrecognized_status():
+	"""Return a tiny display-only object describing the last unrecognized detection.
+
+	This is intentionally lightweight: frontend uses it to show a short-lived banner.
+	"""
+	try:
+		return dict(latest_unrecognized_result)
+	except Exception as e:
+		return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.get("/anti_spoof")
+def anti_spoof_status():
+	"""Return a tiny object describing last anti-spoof / liveness signal."""
+	try:
+		return dict(latest_spoof_result)
+	except Exception as e:
+		return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@router.get("/detect")
+def detect_status():
+	"""Return recent face detection summary: number of faces and timestamp.
+
+	Frontend should poll this for quick presence indication.
+	"""
+	try:
+		return dict(latest_detection_result)
 	except Exception as e:
 		return JSONResponse(content={"error": str(e)}, status_code=500)

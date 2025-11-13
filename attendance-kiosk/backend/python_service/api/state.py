@@ -80,6 +80,8 @@ def get_db() -> sqlite3.Connection:
             teacher_id TEXT,
             days TEXT,
             time TEXT,
+            time_start TEXT,
+            time_end TEXT,
             createdAt TEXT,
             updatedAt TEXT,
             raw_doc JSON,
@@ -99,6 +101,43 @@ def get_db() -> sqlite3.Connection:
         )
     """
     )
+
+    # Kiosk notifications table: local cache of kiosk-generated alerts/events
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kiosk_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            notif_id TEXT UNIQUE,
+            kiosk_id TEXT,
+            room TEXT,
+            title TEXT,
+            type TEXT,
+            details TEXT,
+            timestamp TEXT,
+            createdAt TEXT,
+            sync_status TEXT DEFAULT 'pending',
+            fs_id TEXT
+        )
+    """
+    )
+
+    # Add optional metadata columns if they don't already exist (safe to run repeatedly)
+    try:
+        conn.execute("ALTER TABLE kiosk_notifications ADD COLUMN attempts INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE kiosk_notifications ADD COLUMN last_attempt_at TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE kiosk_notifications ADD COLUMN last_error TEXT")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE kiosk_notifications ADD COLUMN last_notified_at TEXT")
+    except Exception:
+        pass
 
     return conn
 
