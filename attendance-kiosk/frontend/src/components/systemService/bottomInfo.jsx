@@ -15,6 +15,7 @@ function BottomInfo({ studentCount = "N/A" }) {
   const [time, setTime] = useState(new Date());
   const [unrecognized, setUnrecognized] = useState(false);
   const [teacherDetected, setTeacherDetected] = useState(null);
+  const [spoofDetected, setSpoofDetected] = useState(false);
   // recognition stability refs (require ~1.5s hold-still before declaring unrecognized)
   const recognitionStartRef = React.useRef(null);
   const recognitionClearTimerRef = React.useRef(null);
@@ -24,6 +25,24 @@ function BottomInfo({ studentCount = "N/A" }) {
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Poll /detect to surface spoof status in BottomInfo as well
+  useEffect(() => {
+    let mounted = true;
+    const pollDetect = async () => {
+      try {
+        const r = await axios.get(`${API_BASE}/detect`);
+        if (!mounted) return;
+        const dd = r.data || {};
+        setSpoofDetected(Boolean(dd.spoof));
+      } catch (e) {
+        if (mounted) setSpoofDetected(false);
+      }
+    };
+    pollDetect();
+    const id = setInterval(pollDetect, 800);
+    return () => { mounted = false; clearInterval(id); };
   }, []);
 
   useEffect(() => {
@@ -183,8 +202,16 @@ function BottomInfo({ studentCount = "N/A" }) {
   }, [sessionInfo]);
 
   // derive display fields (show unrecognized state when session active)
-  const displayName = (sessionInfo && sessionInfo.class_id && unrecognized) ? 'Unidentified face detected' : studentName;
-  const displayStatus = (sessionInfo && sessionInfo.class_id && unrecognized) ? 'Unidentified' : studentStatus;
+  // derive display fields, giving priority to spoof warning when detected
+  let displayName = studentName;
+  let displayStatus = studentStatus;
+  if (spoofDetected) {
+    displayName = 'Spoofed face detected';
+    displayStatus = 'Spoof attempt blocked';
+  } else if (sessionInfo && sessionInfo.class_id && unrecognized) {
+    displayName = 'Unidentified face detected';
+    displayStatus = 'Unidentified';
+  }
 
   // Poll for recognized teacher (low rate)
   // Note: start/stop flow moved into CameraFeed overlay. BottomInfo no longer polls for teacher detection.
