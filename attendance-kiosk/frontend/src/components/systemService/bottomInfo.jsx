@@ -18,6 +18,8 @@ function BottomInfo({ studentCount = "N/A" }) {
   // recognition stability refs (require ~1.5s hold-still before declaring unrecognized)
   const recognitionStartRef = React.useRef(null);
   const recognitionClearTimerRef = React.useRef(null);
+  // throttle marking attendance per-student (avoid spamming)
+  const lastMarkedRef = React.useRef(new Map());
 
   useEffect(() => {
     const timer = setInterval(() => setTime(new Date()), 1000);
@@ -43,13 +45,14 @@ function BottomInfo({ studentCount = "N/A" }) {
       return () => { mounted = false; };
     }
 
-    // Session is active: poll recognize-camera and apply existing behavior + stability logic.
+    // Session is active: poll multi-face endpoint and apply existing behavior + stability logic.
     const poll = async () => {
       if (!mounted) return;
       try {
-        const res = await axios.get(`${API_BASE}/recognize-camera`);
+        const res = await axios.get(`${API_BASE}/recognize-students`);
         const data = res.data || {};
-        const detected = (typeof data.detected !== 'undefined') ? Number(data.detected) : 0;
+        const results = Array.isArray(data.results) ? data.results : [];
+        const detected = (typeof data.detected !== 'undefined') ? Number(data.detected) : (results.length || 0);
 
         // session active but no recognized student yet: show detecting
         if (!lastStudentRef.current) {
@@ -57,26 +60,50 @@ function BottomInfo({ studentCount = "N/A" }) {
           setStudentStatus('Detecting faces...');
         }
 
-        // Persist last recognized student until a different student is recognized.
-        if (data && data.id && (data.status === 'success' || data.status === 'denied')) {
-          if (!lastStudentRef.current || String(lastStudentRef.current.id) !== String(data.id) || lastStudentRef.current.status !== data.status) {
-            lastStudentRef.current = data;
-            const isDenied = data.status === 'denied' || data.registered === false;
-            setStudentName(data.name || (isDenied ? 'Unknown' : 'Unknown'));
+        // Choose a primary student for display: first success, otherwise first denied, otherwise first unknown
+        const primary = results.find(r => r && r.status === 'success')
+          || results.find(r => r && r.status === 'denied')
+          || (results.length ? results[0] : null);
+
+        if (primary && (primary.id || primary.status)) {
+          if (!lastStudentRef.current || String(lastStudentRef.current.id) !== String(primary.id) || lastStudentRef.current.status !== primary.status) {
+            lastStudentRef.current = primary;
+            const isDenied = primary.status === 'denied' || primary.registered === false;
+            setStudentName(primary.name || (isDenied ? 'Unknown' : 'Unknown'));
             if (isDenied) {
               setStudentStatus('Denied - Not registered');
-              setStudentId(data.id || null);
+              setStudentId(primary.id || null);
               setStudentProfileUrl(null);
-            } else {
+            } else if (primary.status === 'success') {
               setStudentStatus('Present');
-              setStudentId(data.id || null);
-              setStudentProfileUrl(data.profilePicUrl ? (data.profilePicUrl.startsWith('/') ? `${API_BASE}${data.profilePicUrl}` : data.profilePicUrl) : (data.id ? `${API_BASE}/photos/students/${data.id}.jpg` : null));
-              try {
-                const m = await axios.post(`${API_BASE}/session/mark`, { student_id: data.id, student_name: data.name });
-                if (m.data && Array.isArray(m.data.studentsPresent)) {
-                  setPresentCount(m.data.studentsPresent.length);
+              setStudentId(primary.id || null);
+              setStudentProfileUrl(primary.profilePicUrl ? (String(primary.profilePicUrl).startsWith('/') ? `${API_BASE}${primary.profilePicUrl}` : primary.profilePicUrl) : (primary.id ? `${API_BASE}/photos/students/${primary.id}.jpg` : null));
+            } else {
+              // unknown or other statuses
+              setStudentStatus('Detecting faces...');
+              setStudentId(null);
+              setStudentProfileUrl(null);
+            }
+          }
+        }
+
+        // Mark attendance for all successes (throttled per-student)
+        if (sessionInfo && sessionInfo.class_id && results.length) {
+          const now = Date.now();
+          for (const r of results) {
+            if (r && r.status === 'success' && r.id) {
+              const lastTs = lastMarkedRef.current.get(String(r.id)) || 0;
+              if (now - lastTs > 2000) { // throttle 2s per student
+                try {
+                  const m = await axios.post(`${API_BASE}/session/mark`, { student_id: r.id, student_name: r.name });
+                  lastMarkedRef.current.set(String(r.id), Date.now());
+                  if (m.data && Array.isArray(m.data.studentsPresent)) {
+                    setPresentCount(m.data.studentsPresent.length);
+                  }
+                } catch (e) {
+                  // ignore mark errors
                 }
-              } catch (e) {}
+              }
             }
           }
         }
@@ -85,7 +112,9 @@ function BottomInfo({ studentCount = "N/A" }) {
         try {
           // Only let a teacher match block unrecognized in the pre-session state.
           const teacherBlocks = teacherDetected && teacherDetected.status === 'success' && !(sessionInfo && sessionInfo.class_id);
-          if (data && data.status === 'unknown' && detected > 0 && !teacherBlocks) {
+          const anySuccess = results.some(r => r && r.status === 'success');
+          const anyUnknown = results.some(r => r && r.status === 'unknown');
+          if (!anySuccess && anyUnknown && detected > 0 && !teacherBlocks) {
             if (!recognitionStartRef.current) {
               recognitionStartRef.current = Date.now();
             } else {
@@ -101,7 +130,7 @@ function BottomInfo({ studentCount = "N/A" }) {
           } else {
             recognitionStartRef.current = null;
             // Clear unrecognized when there is no active unknown detection or no faces present
-            if (!(data && data.status === 'unknown' && detected > 0)) {
+            if (!(!anySuccess && anyUnknown && detected > 0)) {
               setUnrecognized(false);
             }
           }

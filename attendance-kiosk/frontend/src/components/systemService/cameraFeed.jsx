@@ -52,6 +52,7 @@ function CameraFeed() {
   const [detectCount, setDetectCount] = useState(0);
   const [studentDetected, setStudentDetected] = useState(null);
   const [spoofDetected, setSpoofDetected] = useState(false);
+  
 
   useEffect(() => {
     let canceled = false;
@@ -131,26 +132,6 @@ function CameraFeed() {
   // from the teacher/student polls so we don't affect their timing.
   useEffect(() => {
     let mounted = true;
-    const pollSpoof = async () => {
-      try {
-        const res = await axios.get(`${API_BASE}/anti_spoof`);
-        if (!mounted) return;
-        const d = res.data || {};
-        if (d && d.status === 'spoof' && d.ts) {
-          // show spoof immediately
-          setUnrecognizedDetected(false); // prefer spoof over unrecognized
-          setDetectCount((c) => c); // no-op but keep detectCount in sync
-          // reuse unrecognized state variable to indicate an active alert is present
-          // but keep a separate state for spoof below
-          setSpoofDetected(true);
-        } else {
-          setSpoofDetected(false);
-        }
-      } catch (e) {
-        if (mounted) setSpoofDetected(false);
-      }
-    };
-
     const pollUnrecognized = async () => {
       try {
         const res = await axios.get(`${API_BASE}/unrecognized`);
@@ -176,8 +157,11 @@ function CameraFeed() {
         if (!mounted) return;
         const dd = r.data || {};
         setDetectCount(Number(dd.faces || 0));
+  // Spoof interpretation: lower score = REAL, higher = SPOOF; backend provides boolean 'spoof'
+        setSpoofDetected(Boolean(dd.spoof));
       } catch (e) {
         if (mounted) setDetectCount(0);
+        if (mounted) setSpoofDetected(false);
       }
     };
     pollDetect();
@@ -195,11 +179,7 @@ function CameraFeed() {
     };
     pollStudent();
   const sid2 = setInterval(pollStudent, 800);
-  // start spoof poll
-  pollSpoof();
-  const spid = setInterval(pollSpoof, 1000);
-
-    return () => { mounted = false; clearInterval(uid); clearInterval(did); clearInterval(sid2); clearInterval(spid); };
+    return () => { mounted = false; clearInterval(uid); clearInterval(did); clearInterval(sid2); };
   }, []);
 
 
@@ -316,50 +296,87 @@ function CameraFeed() {
     };
   }, []);
 
-  // derive overlay state
-  // Priority order:
-  //  - pending_stop, active session
-  //  - teacher not registered / teacher recognized (presession)
-  //  - spoof detected (anti-spoof)
-  //  - unrecognized (prominent red banner) when backend/local signal set
-  //  - recognizing when faces present but no match
-  let overlay = { state: "ready", label: "Detecting faces..." };
+  // derive overlay state with strict priority to avoid conflicting messages
+  // Top-level priority:
+  // 1) pending_stop (stop flow)
+  // 2) active session
+  // 3) teacher not registered
+  // PRESSESSION (no active session): strict phases applied in order:
+  //    a) detectCount === 0 -> Detecting faces
+  //    b) detectCount > 0 and student matched -> Service Has not Yet Started
+  //    c) detectCount > 0 and teacher matched -> Recognized (teacher)
+  //    d) detectCount > 0 and no matches -> Unknown Face detected
+  // POSTSESSION (active session): preserve unrecognizedDetected -> unrecognized, else recognizing
+  let overlay = { state: "detecting", label: "Detecting faces" };
+
+  // 1) pending stop
   if (stopPending) {
     overlay = { state: "pending_stop", label: "Scan face to stop service" };
-  } else if (sessionInfo && sessionInfo.class_id) {
+  }
+  // Spoof detected (show high-priority warning regardless of session state)
+  else if (spoofDetected) {
+    overlay = { state: "spoof", label: "Spoofed face detected" };
+  }
+  // 2) active session
+  else if (sessionInfo && sessionInfo.class_id) {
     overlay = { state: "active", label: "Active" };
-  } else if (teacherDetected && teacherRegistered === false) {
+  }
+  // 3) teacher not registered (explicit negative)
+  else if (teacherDetected && teacherRegistered === false) {
     overlay = { state: "not_registered", label: "You are not registered in this room" };
   }
-  // If we're not in an active session, show spoof alerts before showing a recognized teacher
+  // PRESSESSION: no active session
   else if (!sessionInfo || !sessionInfo.class_id) {
-    if (spoofDetected) {
-      // Spoofing detected: show urgent message
-      overlay = { state: "spoof", label: "Fake/spoof face detected" };
-    } else if (teacherDetected) {
-      // If a teacher is recognized, prefer showing the teacher (presession start flow)
-      overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
+    if (detectCount === 0) {
+      // a) no faces
+      overlay = { state: "detecting", label: "Detecting faces" };
+    } else {
+      // at least one face present
+      const teacherMatched = Boolean(teacherDetected && teacherDetected.status === 'success');
+      const studentMatched = Boolean(studentDetected && (studentDetected.status === 'service_inactive' || studentDetected.status === 'success' || studentDetected.known));
+
+      // 1) teacher match should show classes (preserve existing openClassModal behavior)
+      if (teacherMatched) {
+        // teacher match: display classes as before
+        overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
+      }
+      // student match in presession -> prompt that service hasn't started
+      else if (studentMatched) {
+        overlay = { state: "service_not_started", label: "Service Has not Yet Started" };
+      }
+      // no matches -> wait for stability before marking unrecognized
+      else {
+        // rely on the existing stability logic (which sets unrecognizedDetected after ~1.5s)
+        if (unrecognizedDetected) {
+          overlay = { state: "unrecognized", label: "Unrecognized Face Detected" };
+        } else {
+          // still trying to recognize or waiting for stability
+          overlay = { state: "recognizing", label: "Recognizing face..." };
+        }
+      }
     }
-  } else if (teacherDetected) {
-    // If a teacher is recognized during an active session fallthrough (still show teacher info)
+  }
+  // POSTSESSION: (active session handled above) fallthrough for teacher recognition
+  else if (teacherDetected) {
     overlay = { state: "recognized", label: teacherDetected.name || "Teacher" };
-  } else if (unrecognizedDetected) {
-    // show unrecognized prominently (red outline)
-    overlay = { state: "unrecognized", label: "Unidentified face detected" };
-  } else if (
-    // show "Recognizing face..." only when there is at least one detected face
-    // and that detection isn't a pre-session student match (we ignore student faces before session)
-    detectCount > 0 &&
-    !(studentDetected && (studentDetected.status === 'success' || studentDetected.known))
-  ) {
+  }
+  // show backend unrecognized signal if present when not presession
+  else if (unrecognizedDetected) {
+    overlay = { state: "unrecognized", label: "Unknown Face detected" };
+  }
+  // default: show recognizing when faces present and no pre-session student match
+  else if (detectCount > 0 && !(studentDetected && (studentDetected.status === 'success' || studentDetected.known))) {
     overlay = { state: "recognizing", label: "Recognizing face..." };
   }
 
   const circleClass = {
     ready: "bg-white",
+    detecting: "bg-white",
     recognizing: "bg-yellow-300",
     recognized: "bg-yellow-400",
     unrecognized: "bg-red-500",
+    spoof: "bg-red-600",
+    service_not_started: "bg-blue-400",
     active: "bg-red-500",
     pending_stop: "bg-blue-400",
     not_registered: "bg-red-500",
@@ -367,32 +384,33 @@ function CameraFeed() {
 
   const textClass = {
     ready: "text-white",
+    detecting: "text-white",
     recognizing: "text-yellow-300",
     recognized: "text-yellow-400",
     unrecognized: "text-red-400",
+    spoof: "text-red-400",
+    service_not_started: "text-blue-400",
     active: "text-green-400",
     pending_stop: "text-blue-400",
     not_registered: "text-red-400",
-    spoof: "text-white",
   }[overlay.state];
 
   const borderClass = {
     ready: "border-white",
+    detecting: "border-white",
     recognizing: "border-yellow-300",
     recognized: "border-yellow-400",
     unrecognized: "border-red-500",
+    spoof: "border-red-600",
+    service_not_started: "border-blue-400",
     active: "border-green-400",
     pending_stop: "border-blue-400",
     not_registered: "border-red-400",
-    spoof: "border-yellow-400",
   }[overlay.state];
 
   const openClassModal = async () => {
     if (!teacherDetected) return;
-    if (spoofDetected) {
-      setToast("Fake/spoof face detected — cannot start service");
-      return;
-    }
+    
     try {
       // prefer classes returned with recognition when available (and assigned)
       let cls = [];
@@ -427,10 +445,7 @@ function CameraFeed() {
 
   const startService = async () => {
     if (!selectedClass || !teacherDetected) return;
-    if (spoofDetected) {
-      setToast("Cannot start service while spoof detected");
-      return;
-    }
+    
     setIsStarting(true);
     try {
       const cls = classesList.find((c) => c.id === selectedClass) || {};
@@ -471,16 +486,7 @@ function CameraFeed() {
     prevSessionRef.current = cur;
   }, [sessionInfo]);
 
-  // Show a short toast when a spoof is detected before the session starts
-  useEffect(() => {
-    if (spoofDetected && !(sessionInfo && sessionInfo.class_id)) {
-      setToast("Fake/spoof face detected");
-      // clear toast after 3s
-      const t = setTimeout(() => setToast(null), 3000);
-      return () => clearTimeout(t);
-    }
-    return undefined;
-  }, [spoofDetected, sessionInfo]);
+  
 
   // auto-hide toast
   useEffect(() => {
@@ -543,15 +549,6 @@ function CameraFeed() {
           {/* When recognized or otherwise, render a single overlay block via branches - clearer than nested ternaries */}
           {(() => {
             if (overlay.state === 'recognized') {
-              // If spoof detected, disable the start button and show an explicit label
-              if (spoofDetected) {
-                return (
-                  <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-yellow-600/20 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-                    <span className={`inline-block w-3 h-3 rounded-full bg-yellow-400`} aria-hidden="true" />
-                    <span className={`font-medium ${textClass}`}>Spoof detected</span>
-                  </div>
-                );
-              }
               return (
                 <button
                   onClick={openClassModal}
@@ -593,19 +590,20 @@ function CameraFeed() {
                 </div>
               );
             }
-            if (overlay.state === 'spoof') {
-              return (
-                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-yellow-600/20 backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
-                  <span className={`inline-block w-3 h-3 rounded-full bg-yellow-400`} aria-hidden="true" />
-                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
-                </div>
-              );
-            }
+            
             if (overlay.state === 'unrecognized') {
               return (
                 <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-transparent backdrop-blur-sm border border-red-500`} style={{ borderWidth: 1 }}>
                   <span className={`inline-block w-3 h-3 rounded-full bg-red-500`} aria-hidden="true" />
                   <span className={`font-medium text-red-400`}>{overlay.label}</span>
+                </div>
+              );
+            }
+            if (overlay.state === 'spoof') {
+              return (
+                <div className={`inline-flex items-center space-x-3 px-4 py-2 rounded-full bg-transparent backdrop-blur-sm border ${borderClass}`} style={{ borderWidth: 1 }}>
+                  <span className={`inline-block w-3 h-3 rounded-full ${circleClass}`} aria-hidden="true" />
+                  <span className={`font-medium ${textClass}`}>{overlay.label}</span>
                 </div>
               );
             }
